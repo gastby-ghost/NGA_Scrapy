@@ -57,6 +57,45 @@ NGA_Scrapy/
     └── run_scheduler.py         # 调度器主程序
 ```
 
+## 虚拟环境设置
+
+### 创建虚拟环境
+
+为了避免依赖冲突，建议在虚拟环境中运行此项目。以下是创建和激活虚拟环境的步骤：
+
+#### Windows系统
+
+```bash
+# 创建虚拟环境
+python -m venv venv
+
+# 激活虚拟环境
+venv\Scripts\activate
+
+# 退出虚拟环境（使用完毕后）
+deactivate
+```
+
+#### Linux/Mac系统
+
+```bash
+# 创建虚拟环境
+python3 -m venv venv
+
+# 激活虚拟环境
+source venv/bin/activate
+
+# 退出虚拟环境（使用完毕后）
+deactivate
+```
+
+### 虚拟环境使用建议
+
+1. **项目隔离**：每个项目使用独立的虚拟环境，避免依赖冲突
+2. **版本控制**：将`venv`目录添加到`.gitignore`文件中，不提交虚拟环境
+3. **依赖管理**：使用`pip freeze > requirements.txt`导出当前环境的依赖包列表
+4. **环境复制**：其他开发者可以通过`pip install -r requirements.txt`快速复现环境
+
 ## 安装和配置指南
 
 ### 1. 克隆项目
@@ -66,7 +105,19 @@ git clone <项目地址>
 cd NGA_Scrapy
 ```
 
-### 2. 安装依赖
+### 2. 创建并激活虚拟环境
+
+```bash
+# Windows
+python -m venv venv
+venv\Scripts\activate
+
+# Linux/Mac
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. 安装依赖
 
 ```bash
 pip install -r requirements.txt

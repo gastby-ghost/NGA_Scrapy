@@ -1,0 +1,26 @@
+# 核心爬虫框架
+scrapy>=2.11.0
+
+# 数据库ORM
+sqlalchemy>=2.0.0
+
+# 浏览器自动化工具
+playwright>=1.40.0
+selenium>=4.15.0
+
+# 定时任务调度器
+apscheduler>=3.9.0
+pytz>=2023.3
+
+# 系统进程监控
+psutil>=5.9.0
+
+# Scrapy依赖
+twisted>=22.10.0
+
+apscheduler>=3.9.0
+twisted>=22.10.0
+# 数据库驱动（可选，根据需要安装）
+# sqlite3 - Python内置，无需安装
+# pymysql>=1.1.0  # MySQL
+# psycopg2-binary>=2.9.0  # PostgreSQL
