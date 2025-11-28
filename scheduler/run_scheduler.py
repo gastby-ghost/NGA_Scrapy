@@ -301,6 +301,8 @@ if __name__ == '__main__':
         logger.info("  - 统计报告: {}".format(
             "启用" if config.get('notifications', {}).get('enable_statistics_report') else "禁用"
         ))
+        if config.get('notifications', {}).get('enable_statistics_report'):
+            logger.info("  - 早期统计报告: 启用（启动后10小时发送）")
         logger.info("  - 错误告警: {}".format(
             "启用" if config.get('notifications', {}).get('enable_error_alerts') else "禁用"
         ))
@@ -346,6 +348,17 @@ if __name__ == '__main__':
             timezone=tz
         )
         logger.info(f"统计报告任务已添加: 每 {interval_days} 天执行一次，时间: {report_time}")
+
+        # 添加10小时后的统计报告任务（一次性）
+        ten_hours_later = datetime.now(tz) + timedelta(hours=10)
+        scheduler.add_job(
+            send_statistics_report,
+            'date',
+            run_date=ten_hours_later,
+            id='early_statistics_report_job',
+            replace_existing=True
+        )
+        logger.info(f"早期统计报告任务已添加: {ten_hours_later} 执行（启动后10小时）")
 
     # 添加任务监听器
     scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
