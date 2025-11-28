@@ -1,0 +1,2 @@
+apscheduler>=3.9.0
+twisted>=22.10.0
