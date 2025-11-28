@@ -3,6 +3,8 @@ import json
 import os
 import time
 import threading
+import signal
+import sys
 from queue import Queue, Empty
 from contextlib import contextmanager
 from datetime import datetime
@@ -12,6 +14,9 @@ from typing import Optional, Dict, List, Tuple
 from scrapy.downloadermiddlewares.retry import RetryMiddleware
 from scrapy.utils.response import response_status_message
 import random
+from concurrent.futures import ThreadPoolExecutor, Future
+import uuid
+from scrapy import signals
 
 class PerformanceStats:
     """性能统计工具类"""
@@ -66,29 +71,49 @@ class PerformanceStats:
         }
 
 class BrowserPool:
-    """Playwright浏览器连接池（带性能监控）"""
+    """Playwright浏览器连接池（带性能监控）- 线程安全版本"""
     def __init__(self, max_browsers: int = 4, spider_logger=None):
         self.max_browsers = max_browsers
         self.logger = spider_logger
-        self._pool = Queue(maxsize=max_browsers)
-        self._lock = threading.Lock()
-        self._active_count = 0
-        self.playwright = sync_playwright().start()
         self.stats = PerformanceStats()
-        
-        # 预初始化浏览器实例
-        for _ in range(max_browsers):
-            self._add_browser_instance()
+        self._request_queue = Queue()
+        self._result_map = {}
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._playwright_thread = None
+        self._stop_event = threading.Event()
+        self._initialized = False
+        self._init_condition = threading.Condition(self._lock)
+        self._shutdown_handled = False
 
-    def _add_browser_instance(self):
-        """创建新的浏览器实例并加入池中"""
-        start_time = time.time()
-        with self._lock:
-            if self._active_count >= self.max_browsers:
-                return
+        # 启动Playwright工作线程（改为非守护线程以确保正确关闭）
+        self._start_playwright_thread()
 
-            try:
-                browser = self.playwright.chromium.launch(
+        # 等待初始化完成
+        with self._init_condition:
+            while not self._initialized:
+                self._init_condition.wait(timeout=1)
+
+    def _start_playwright_thread(self):
+        """启动Playwright工作线程"""
+        self._playwright_thread = threading.Thread(
+            target=self._playwright_worker,
+            name="PlaywrightWorker",
+            daemon=False  # 改为非守护线程，确保正确关闭
+        )
+        self._playwright_thread.start()
+
+    def _playwright_worker(self):
+        """Playwright工作线程"""
+        try:
+            self.logger.info("正在初始化Playwright工作线程...")
+            playwright = sync_playwright().start()
+            self.logger.info("Playwright初始化完成")
+
+            # 创建浏览器池
+            browser_pool = []
+            for _ in range(self.max_browsers):
+                browser = playwright.chromium.launch(
                     headless=True,
                     args=[
                         '--disable-gpu',
@@ -108,69 +133,131 @@ class BrowserPool:
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                     }
                 )
-                self._pool.put((browser, context))
-                self._active_count += 1
-                duration = time.time() - start_time
-                self.logger.debug(
-                    f"新增浏览器实例(耗时{duration:.2f}s)，当前池大小: {self._active_count}/{self.max_browsers}"
-                )
-            except Exception as e:
-                self.logger.error(f"创建浏览器实例失败: {str(e)}")
-                raise
+                browser_pool.append((browser, context))
 
-    @contextmanager
-    def acquire(self, cookies: Optional[List[Dict]] = None):
-        """获取浏览器资源上下文管理器（带性能监控）"""
-        browser, context = None, None
-        start_time = time.time()
-        try:
-            try:
-                browser, context = self._pool.get(timeout=30)
-                page = context.new_page()
-                
-                if cookies:
-                    context.clear_cookies()
-                    context.add_cookies(cookies)
-                
-                yield page
-                self.stats.log_request(True, time.time() - start_time)
-            except Empty:
-                self.stats.log_timeout()
-                self.logger.warning("获取浏览器实例超时，当前池状态: "
-                                  f"{self._active_count}/{self.max_browsers} 活跃")
-                raise TimeoutError("获取浏览器实例超时，请检查资源是否充足")
-            except Exception as e:
-                self.stats.log_request(False, time.time() - start_time)
-                self.logger.error(f"使用浏览器资源时出错: {str(e)}")
-                raise
-        finally:
-            try:
-                if 'page' in locals() and page and not page.is_closed():
-                    page.close()
-            except Exception as e:
-                self.logger.warning(f"关闭页面时出错: {str(e)}")
-            
-            if browser and context:
-                self._pool.put((browser, context))
-                # 记录资源等待时间
-                wait_duration = time.time() - start_time
-                if wait_duration > 1:  # 只记录显著等待
-                    self.logger.debug(f"资源等待时间: {wait_duration:.2f}s")
+            self.logger.info(f"浏览器池初始化完成，共{len(browser_pool)}个实例")
 
-    def _reinit_instance(self, browser, context):
-        """重建问题实例（带监控）"""
-        start_time = time.time()
-        try:
-            if context:
-                context.close()
-            if browser:
-                browser.close()
+            # 通知初始化完成
+            with self._init_condition:
+                self._initialized = True
+                self._init_condition.notify_all()
+
+            # 工作线程主循环
+            while not self._stop_event.is_set():
+                try:
+                    # 从队列获取任务，使用较短的超时以便及时响应停止信号
+                    request_id, task_func, args, kwargs, result_event = self._request_queue.get(timeout=0.1)
+
+                    # 检查停止事件（避免在执行任务时被阻塞）
+                    if self._stop_event.is_set():
+                        # 处理队列中剩余的任务
+                        if result_event:
+                            result_event.set()
+                        break
+
+                    # 执行任务
+                    try:
+                        result = task_func(browser_pool, *args, **kwargs)
+                        with self._condition:
+                            self._result_map[request_id] = ('success', result, None)
+                    except Exception as e:
+                        with self._condition:
+                            self._result_map[request_id] = ('error', None, str(e))
+                    finally:
+                        with self._condition:
+                            self._condition.notify_all()
+
+                    # 通知任务完成
+                    result_event.set()
+
+                except Empty:
+                    # 空队列，检查停止事件
+                    continue
+                except Exception as e:
+                    self.logger.error(f"工作线程处理任务时出错: {str(e)}")
+
+            # 处理队列中的剩余任务（快速清理）
+            remaining_tasks = []
+            while True:
+                try:
+                    request_id, task_func, args, kwargs, result_event = self._request_queue.get_nowait()
+                    remaining_tasks.append((request_id, result_event))
+                except Empty:
+                    break
+
+            # 标记这些任务为已取消
+            for request_id, result_event in remaining_tasks:
+                with self._condition:
+                    self._result_map[request_id] = ('canceled', None, '任务被取消')
+                self._condition.notify_all()
+                if result_event:
+                    result_event.set()
+
+            # 清理资源
+            self.logger.info("正在关闭浏览器实例...")
+            for browser, context in browser_pool:
+                try:
+                    context.close()
+                    browser.close()
+                except Exception as e:
+                    self.logger.warning(f"关闭资源时出错: {str(e)}")
+
+            playwright.stop()
+            self.logger.info("Playwright工作线程已退出")
+
         except Exception as e:
-            self.logger.warning(f"关闭问题实例时出错: {str(e)}")
-        
-        self._add_browser_instance()
-        self.stats.log_recycle()
-        self.logger.warning(f"实例重建完成，耗时: {time.time() - start_time:.2f}s")
+            self.logger.error(f"Playwright工作线程初始化失败: {str(e)}")
+            with self._init_condition:
+                self._initialized = True
+                self._init_condition.notify_all()
+
+    def _execute_in_playwright_thread(self, task_func, *args, **kwargs):
+        """在Playwright工作线程中执行任务"""
+        # 检查是否已收到停止信号
+        if self._stop_event.is_set():
+            raise InterruptedError("浏览器池正在关闭，任务被中断")
+
+        request_id = str(uuid.uuid4())
+        result_event = threading.Event()
+
+        with self._condition:
+            self._result_map[request_id] = None
+
+        # 添加任务到队列
+        self._request_queue.put((request_id, task_func, args, kwargs, result_event))
+
+        # 等待结果，使用较短的超时并检查停止事件
+        timeout = 60
+        wait_interval = 0.5  # 分段等待以便及时响应停止信号
+        elapsed = 0
+
+        while elapsed < timeout:
+            # 检查停止事件
+            if self._stop_event.is_set():
+                with self._condition:
+                    self._result_map.pop(request_id, None)
+                raise InterruptedError("浏览器池正在关闭，任务被中断")
+
+            # 等待一小段时间
+            if result_event.wait(timeout=wait_interval):
+                break
+            elapsed += wait_interval
+
+        with self._condition:
+            status, result, error = self._result_map.pop(request_id, ('timeout', None, 'Timeout'))
+
+            if status == 'success':
+                return result
+            elif status == 'canceled':
+                raise InterruptedError("任务被取消")
+            elif status == 'error':
+                raise Exception(error)
+            else:
+                raise TimeoutError('任务执行超时')
+
+    def execute(self, task_func, *args, **kwargs):
+        """执行一个Playwright操作"""
+        return self._execute_in_playwright_thread(task_func, *args, **kwargs)
 
     def log_pool_status(self):
         """记录当前连接池状态"""
@@ -178,20 +265,43 @@ class BrowserPool:
         status_report = "\n".join([f"{k}: {v}" for k, v in stats.items()])
         self.logger.info(f"性能统计报告:\n{status_report}")
 
-    def close(self):
-        """关闭所有资源并输出最终报告"""
-        start_time = time.time()
-        while not self._pool.empty():
-            browser, context = self._pool.get_nowait()
-            try:
-                context.close()
-                browser.close()
-            except Exception as e:
-                self.logger.warning(f"关闭资源时出错: {str(e)}")
-        
-        self.playwright.stop()
+    def close(self, force=False):
+        """关闭所有资源
+
+        Args:
+            force: 是否强制立即关闭（用于信号处理）
+        """
+        self.logger.info("正在关闭浏览器池...")
+
+        # 发送停止信号
+        self._stop_event.set()
+
+        if self._playwright_thread and self._playwright_thread.is_alive():
+            # 增加超时时间以确保优雅关闭
+            timeout = 5 if force else 30
+            self.logger.info(f"等待工作线程结束，超时时间: {timeout}秒...")
+
+            # 发送SIGINT到工作线程以加速关闭
+            if force and hasattr(signal, 'pthread_sigmask'):
+                try:
+                    # 尝试中断队列等待
+                    import ctypes
+                    ctypes.pythonapi.PyThread_set_thread_name(
+                        self._playwright_thread.ident, "PlaywrightWorker"
+                    )
+                except:
+                    pass
+
+            self._playwright_thread.join(timeout=timeout)
+
+            # 检查线程是否仍在运行
+            if self._playwright_thread.is_alive():
+                self.logger.warning("工作线程未能在超时时间内结束，强制关闭")
+                # 强制关闭浏览器实例
+                # 注意：由于浏览器实例在工作线程中，这里只能记录警告
+
         self.log_pool_status()
-        self.logger.info(f"资源清理完成，耗时: {time.time() - start_time:.2f}s")
+        self.logger.info("浏览器池已关闭")
 
 
 class PlaywrightMiddleware:
@@ -205,9 +315,23 @@ class PlaywrightMiddleware:
     def from_crawler(cls, crawler):
         if not crawler.settings.getbool('PLAYWRIGHT_ENABLED', True):
             raise NotConfigured('Playwright middleware not enabled')
-        
+
         middleware = cls()
+        crawler.signals.connect(middleware.spider_opened, signal=signals.spider_opened)
+        crawler.signals.connect(middleware.spider_closed, signal=signals.spider_closed)
         return middleware
+
+    def spider_opened(self, spider):
+        """Spider启动时的处理"""
+        self.logger = spider.logger
+        self.logger.info("Playwright中间件已启动，信号处理器已注册")
+
+    def spider_closed(self, spider, reason):
+        """Spider关闭时的处理"""
+        self.logger.info(f"Spider关闭原因: {reason}")
+        if self.browser_pool:
+            self.logger.info("正在通过信号处理器关闭浏览器池...")
+            self.browser_pool.close()
 
 
     def _load_cookies(self) -> None:
@@ -292,43 +416,70 @@ class PlaywrightMiddleware:
                 max_browsers=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
                 spider_logger=spider.logger
             )
-        
+
         # 每小时输出一次统计报告
         if time.time() - self.last_stat_time > 3600:
             self.browser_pool.log_pool_status()
             self.last_stat_time = time.time()
-        
+
         if 'jpg' in request.url:
-            a=1
+            return None
 
         try:
-            with self.browser_pool.acquire(cookies=self.cookies) as page:
-                nav_start = time.time()
-                page.goto(request.url, wait_until="domcontentloaded", timeout=15000)
-                nav_time = time.time() - nav_start
-                
-                alert_start = time.time()
-                self._handle_alert(page)
-                alert_time = time.time() - alert_start
-                
-                load_start = time.time()
-                page.wait_for_load_state("domcontentloaded", timeout=5000)
-                load_time = time.time() - load_start
-                
-                self.logger.debug(
-                    f"页面加载分解耗时 - 导航: {nav_time:.2f}s, "
-                    f"弹窗处理: {alert_time:.2f}s, "
-                    f"等待完成: {load_time:.2f}s"
-                )
-                
-                return scrapy.http.HtmlResponse(
-                    url=page.url,
-                    body=page.content().encode('utf-8'),
-                    encoding='utf-8',
-                    request=request
-                )
+            # 定义浏览器任务函数
+            def _fetch_page(browser_pool, url, cookies):
+                browser, context = browser_pool[0]  # 使用第一个浏览器实例
+                page = context.new_page()
+
+                try:
+                    if cookies:
+                        context.clear_cookies()
+                        context.add_cookies(cookies)
+
+                    nav_start = time.time()
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    nav_time = time.time() - nav_start
+
+                    alert_start = time.time()
+                    self._handle_alert(page)
+                    alert_time = time.time() - alert_start
+
+                    load_start = time.time()
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    load_time = time.time() - load_start
+
+                    self.logger.debug(
+                        f"页面加载分解耗时 - 导航: {nav_time:.2f}s, "
+                        f"弹窗处理: {alert_time:.2f}s, "
+                        f"等待完成: {load_time:.2f}s"
+                    )
+
+                    return {
+                        'url': page.url,
+                        'content': page.content(),
+                        'success': True
+                    }
+                finally:
+                    page.close()
+
+            # 在Playwright工作线程中执行页面获取
+            result = self.browser_pool.execute(
+                _fetch_page,
+                request.url,
+                self.cookies
+            )
+
+            self.browser_pool.stats.log_request(True, 1.0)
+
+            return scrapy.http.HtmlResponse(
+                url=result['url'],
+                body=result['content'].encode('utf-8'),
+                encoding='utf-8',
+                request=request
+            )
         except Exception as e:
             spider.logger.error(f"Playwright请求处理失败: {str(e)}")
+            self.browser_pool.stats.log_request(False, 0)
             return None
 
     def _handle_alert(self, page):

@@ -11,12 +11,11 @@ DOWNLOADER_MIDDLEWARES = {
 
 # 配置管道
 ITEM_PIPELINES = {
-    'NGA_Scrapy.pipelines.ImageDownloadPipeline': 500,
     'NGA_Scrapy.pipelines.NgaPipeline': 300,
 }
 
-# 设置图片存储路径
-IMAGES_STORE = '/download_images'
+# 设置图片存储路径（使用相对路径，避免权限问题）
+IMAGES_STORE = 'download_images'
 
 
 PLAYWRIGHT_POOL_SIZE = 6  # 根据CPU核心数调整（建议核心数×1.5）

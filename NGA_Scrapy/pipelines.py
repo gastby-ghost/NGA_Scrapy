@@ -187,38 +187,6 @@ class NgaPipeline:
             image_paths=[
                 os.path.join(settings.IMAGES_STORE, path)
                 for path in item.get('images', [])
-            ]
+            ] if 'images' in item else []
         )
         self.session.merge(reply)
-
-
-class ImageDownloadPipeline(ImagesPipeline):
-
-    headers={
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'referer': 'https://ngabbs.com/read.php?tid=43950064&page=7',
-    },
-
-    def get_media_requests(self, item, info):
-        # 从item中获取图片URL
-        if 'image_urls' in item and len(item['image_urls']) != 0:
-            for image_url in item['image_urls']:
-                try:
-                    yield scrapy.Request(url=image_url)
-                except Exception as e:
-                    raise DropItem(f"Error processing image URL {image_url}: {str(e)}")
-
-    def file_path(self, request, response=None, info=None, *, item=None):
-        if 'image_urls' in item and len(item['image_urls']) != 0:
-        # 生成文件名: 使用原始URL的MD5哈希值
-            image_guid = hashlib.sha1(to_bytes(request.url)).hexdigest()
-            return f'{image_guid}.jpg'
-    
-    def item_completed(self, results, item, info):
-        if 'image_urls' in item and len(item['image_urls']) != 0:
-            # 处理下载完成的图片
-            image_paths = [x['path'] for ok, x in results if ok]
-            if not image_paths:
-                raise DropItem(f"image_paths:{image_paths}")
-            item['image_paths'] = image_paths
-            return item
