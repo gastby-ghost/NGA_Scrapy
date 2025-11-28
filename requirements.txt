@@ -21,6 +21,8 @@ Pillow>=8.0.0  # 图片处理库，ImagesPipeline 需要
 
 apscheduler>=3.9.0
 twisted>=22.10.0
+
+PyYAML
 # 数据库驱动（可选，根据需要安装）
 # sqlite3 - Python内置，无需安装
 # pymysql>=1.1.0  # MySQL

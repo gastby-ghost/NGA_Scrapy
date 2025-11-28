@@ -75,3 +75,5 @@ logs/
 # Playwright浏览器
 playwright-report/
 test-results/
+
+scheduler/email_config.yaml

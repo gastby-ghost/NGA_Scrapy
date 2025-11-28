@@ -165,6 +165,264 @@ python run_scheduler.py
 
 默认每30分钟执行一次爬取任务。
 
+#### 后台运行调度器
+
+由于调度器是持续运行的进程，关闭终端会导致进程停止。以下是几种让调度器在后台持续运行的方法：
+
+##### 方法1：nohup 后台运行（推荐用于临时测试）
+
+```bash
+cd scheduler
+nohup python run_scheduler.py > scheduler.log 2>&1 &
+```
+
+- 日志会输出到 `scheduler.log` 文件
+- 即使关闭终端也会继续运行
+- 停止方法：使用 `ps aux | grep run_scheduler` 找到进程ID，然后 `kill <PID>`
+
+##### 方法2：screen/tmux 会话（推荐用于开发环境）
+
+```bash
+# 安装screen（如果未安装）
+# Ubuntu/Debian: sudo apt-get install screen
+# CentOS/RHEL: sudo yum install screen
+
+# 创建命名会话
+screen -S ngascrape
+python run_scheduler.py
+# 按 Ctrl+A 然后按 D 退出会话，进程继续在后台运行
+
+# 查看所有会话
+screen -ls
+
+# 恢复会话
+screen -r ngascrape
+
+# 结束会话（恢复后使用）
+exit
+```
+
+##### 方法3：systemd 服务（推荐用于生产环境）
+
+创建 `/etc/systemd/system/nga-scraper.service` 文件：
+
+```ini
+[Unit]
+Description=NGA Scraper Service
+After=network.target
+
+[Service]
+Type=simple
+User=your_username
+WorkingDirectory=/home/shan/NGA_Scrapy/scheduler
+ExecStart=/home/shan/NGA_Scrapy/venv/bin/python run_scheduler.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动并设置开机自启：
+
+```bash
+# 重新加载systemd配置
+sudo systemctl daemon-reload
+
+# 启用服务（开机自启）
+sudo systemctl enable nga-scraper
+
+# 启动服务
+sudo systemctl start nga-scraper
+
+# 查看服务状态
+sudo systemctl status nga-scraper
+
+# 查看日志
+sudo journalctl -u nga-scraper -f
+
+# 停止服务
+sudo systemctl stop nga-scraper
+```
+
+**systemd 的优势：**
+- 系统重启后自动启动
+- 进程崩溃时自动重启
+- 统一的日志管理
+- 更容易管理服务生命周期
+
+##### 方法4：使用supervisor（生产环境的另一个选择）
+
+安装 supervisor：
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install supervisor
+
+# CentOS/RHEL
+sudo yum install supervisor
+```
+
+创建配置文件 `/etc/supervisor/conf.d/nga-scraper.conf`：
+
+```ini
+[program:nga-scraper]
+command=/home/shan/NGA_Scrapy/venv/bin/python run_scheduler.py
+directory=/home/shan/NGA_Scrapy/scheduler
+user=your_username
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/nga-scraper.err.log
+stdout_logfile=/var/log/nga-scraper.out.log
+```
+
+启动服务：
+
+```bash
+# 重新加载配置
+sudo supervisorctl reread
+sudo supervisorctl update
+
+# 管理服务
+sudo supervisorctl start nga-scraper
+sudo supervisorctl stop nga-scraper
+sudo supervisorctl status nga-scraper
+```
+
+## 邮件通知功能
+
+调度器支持邮件通知功能，包括**定期统计报告**和**错误告警**。需要先配置邮件参数。
+
+### 安装邮件依赖
+
+```bash
+pip install PyYAML>=6.0
+```
+
+### 配置邮件参数
+
+复制并编辑配置文件：
+
+```bash
+cd scheduler
+cp email_config.yaml email_config.yaml.example
+# 编辑 email_config.yaml 文件
+```
+
+配置项说明：
+
+```yaml
+# SMTP服务器配置（Gmail示例）
+smtp_server: "smtp.gmail.com"  # SMTP服务器
+smtp_port: 587                 # SMTP端口（TLS: 587, SSL: 465）
+username: "your_email@gmail.com"  # 邮箱用户名
+password: "your_app_password"      # 邮箱密码或应用专用密码
+from_email: "your_email@gmail.com" # 发件人邮箱
+to_emails:
+  - "admin@example.com"        # 收件人邮箱列表
+  - "monitor@example.com"
+use_tls: true                  # 是否使用TLS加密
+
+# 通知设置
+notifications:
+  # 是否启用统计报告
+  enable_statistics_report: true
+  # 统计报告发送周期（天）
+  statistics_report_interval_days: 3
+  # 统计报告发送时间（24小时制，格式：HH:MM）
+  statistics_report_time: "09:00"
+
+  # 是否启用错误告警
+  enable_error_alerts: true
+  # 连续失败多少次后发送告警
+  consecutive_failures_threshold: 3
+  # 爬虫运行超时时间（分钟）
+  spider_timeout_minutes: 60
+
+  # 错误率告警阈值
+  error_rate_alert:
+    # 启用错误率告警
+    enabled: true
+    # 错误率阈值（百分比，超过此值将发送告警）
+    threshold_percent: 20
+    # 时间窗口（分钟），计算错误率的滑动窗口
+    time_window_minutes: 30
+```
+
+### 常用邮箱的SMTP配置
+
+#### Gmail
+```yaml
+smtp_server: "smtp.gmail.com"
+smtp_port: 587
+use_tls: true
+```
+⚠️ **注意**：Gmail需要使用应用专用密码，不能使用普通密码。[点击这里生成应用专用密码](https://myaccount.google.com/apppasswords)
+
+#### 163邮箱
+```yaml
+smtp_server: "smtp.163.com"
+smtp_port: 587
+use_tls: true
+```
+
+#### QQ邮箱
+```yaml
+smtp_server: "smtp.qq.com"
+smtp_port: 587
+use_tls: true
+```
+
+#### 企业邮箱（以腾讯企业邮箱为例）
+```yaml
+smtp_server: "smtp.exmail.qq.com"
+smtp_port: 587
+use_tls: true
+```
+
+### 邮件通知功能说明
+
+#### 1. 统计报告
+- **频率**：每3天发送一次（可配置）
+- **时间**：每天09:00（可配置）
+- **内容**：
+  - 新增主题数、回复数、用户数
+  - 下载图片数
+  - 爬取页面数、请求成功/失败数
+  - 平均响应时间
+  - HTTP错误、解析错误、数据库错误统计
+
+#### 2. 错误告警
+- **连续失败告警**：爬虫连续失败3次（可配置）时发送
+- **超时告警**：爬虫运行超过60分钟（可配置）时发送
+- **错误率告警**：最近30分钟内的平均错误率超过20%（可配置）时发送
+- **内容**：告警类型、发生时间、详细错误信息
+
+### 启动带邮件通知的调度器
+
+```bash
+cd scheduler
+python run_scheduler.py
+```
+
+启动后会显示邮件通知是否启用：
+```
+配置信息:
+  - 邮件通知: 已启用
+  - 统计报告: 启用
+  - 错误告警: 启用
+```
+
+### 查看邮件发送日志
+
+所有邮件发送记录都会写入 `scheduler.log` 文件：
+
+```bash
+tail -f scheduler.log | grep -i mail
+```
+
 ## 配置说明
 
 ### 主要配置项（NGA_Scrapy/settings.py）
