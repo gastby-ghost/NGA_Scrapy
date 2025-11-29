@@ -8,6 +8,7 @@ import sys
 from queue import Queue, Empty
 from contextlib import contextmanager
 from datetime import datetime
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 from scrapy.exceptions import NotConfigured
 from typing import Optional, Dict, List, Tuple
@@ -130,7 +131,20 @@ class BrowserPool:
                     ignore_https_errors=True,
                     permissions=[],
                     extra_http_headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                        'Sec-Ch-Ua-Mobile': '?0',
+                        'Sec-Ch-Ua-Platform': '"Windows"',
+                        'Upgrade-Insecure-Requests': '1'
                     }
                 )
                 browser_pool.append((browser, context))
@@ -310,6 +324,7 @@ class PlaywrightMiddleware:
         self.logger = None
         self.cookies = None
         self.last_stat_time = time.time()
+        self._browser_index = 0  # 用于轮询选择浏览器实例
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -427,14 +442,24 @@ class PlaywrightMiddleware:
 
         try:
             # 定义浏览器任务函数
-            def _fetch_page(browser_pool, url, cookies):
-                browser, context = browser_pool[0]  # 使用第一个浏览器实例
+            def _fetch_page(browser_pool, url, cookies, browser_index):
+                # 轮询选择浏览器实例，避免所有请求使用同一个 context
+                browser, context = browser_pool[browser_index % len(browser_pool)]
                 page = context.new_page()
 
                 try:
                     if cookies:
+                        # 先清除旧的 cookies
                         context.clear_cookies()
+                        # 添加新的 cookies
                         context.add_cookies(cookies)
+                        # 等待一小段时间确保 cookies 设置完成
+                        time.sleep(0.1)
+
+                    # 设置 Referer 头部，模拟从首页跳转
+                    page.set_extra_http_headers({
+                        'Referer': 'https://bbs.nga.cn/'
+                    })
 
                     nav_start = time.time()
                     page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -462,11 +487,16 @@ class PlaywrightMiddleware:
                 finally:
                     page.close()
 
+            # 轮询选择浏览器实例
+            browser_index = self._browser_index
+            self._browser_index = (self._browser_index + 1) % 1000000  # 防止溢出
+
             # 在Playwright工作线程中执行页面获取
             result = self.browser_pool.execute(
                 _fetch_page,
                 request.url,
-                self.cookies
+                self.cookies,
+                browser_index
             )
 
             self.browser_pool.stats.log_request(True, 1.0)
@@ -477,8 +507,22 @@ class PlaywrightMiddleware:
                 encoding='utf-8',
                 request=request
             )
+        except PlaywrightTimeoutError as e:
+            # 超时错误，转换为可重试的响应（不显示为错误）
+            self.browser_pool.stats.log_timeout()
+            # 每100次超时输出一次统计
+            if self.browser_pool.stats.timeout_errors % 100 == 0:
+                self.browser_pool.log_pool_status()
+            # 返回 408 状态码，让 RetryMiddleware 自动重试
+            return scrapy.http.Response(
+                url=request.url,
+                status=408,  # Request Timeout
+                body=b'',
+                headers={'Retry-After': '30'}  # 建议 30 秒后重试
+            )
         except Exception as e:
-            spider.logger.error(f"Playwright请求处理失败: {str(e)}")
+            # 其他错误，记录日志
+            spider.logger.warning(f"Playwright请求处理失败（非超时）: {str(e)}")
             self.browser_pool.stats.log_request(False, 0)
             return None
 

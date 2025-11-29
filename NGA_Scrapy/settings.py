@@ -7,6 +7,7 @@ NEWSPIDER_MODULE = 'NGA_Scrapy.spiders'
 # 启用 中间件
 DOWNLOADER_MIDDLEWARES = {
     'NGA_Scrapy.middlewares.PlaywrightMiddleware': 543,
+    'NGA_Scrapy.custom_retry.CustomRetryMiddleware': 540,  # 使用自定义重试中间件
 }
 
 # 配置管道
@@ -41,11 +42,23 @@ custom_settings = {
     'LOG_DATEFORMAT': LOG_DATEFORMAT,
     'LOG_FILE_MAX_BYTES': LOG_FILE_MAX_BYTES,
     'LOG_FILE_BACKUP_COUNT': LOG_FILE_BACKUP_COUNT,
-    'CONCURRENT_REQUESTS': 16,  # 默认 16，根据目标网站承受能力调整
-    'DOWNLOAD_DELAY': 0,     # 适当降低延迟
+    # 降低并发数避免触发反爬
+    'CONCURRENT_REQUESTS': 4,  # 从 16 降到 4，减少并发压力
+    'CONCURRENT_REQUESTS_PER_DOMAIN': 2,  # 每个域名的并发数
+    'DOWNLOAD_DELAY': 2,  # 从 0 增加到 2 秒延迟，模拟人类行为
     'AUTOTHROTTLE_ENABLED': True,  # 启用自动限速
+    'AUTOTHROTTLE_START_DELAY': 1,  # 初始延迟 1 秒
+    'AUTOTHROTTLE_MAX_DELAY': 60,  # 最大延迟 60 秒
+    'AUTOTHROTTLE_TARGET_CONCURRENCY': 2.0,  # 目标并发数
     'HTTPCACHE_ENABLED': False,
     'HTTPCACHE_EXPIRATION_SECS': 186400,  # 缓存 1 天
-    'IMAGES_PIPELINE_MAX_SIZE': 1024*1024*5  # 限制最大图片尺寸(5MB)
+    'IMAGES_PIPELINE_MAX_SIZE': 1024*1024*5,  # 限制最大图片尺寸(5MB)
+    'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+
+    # 启用重试中间件，处理超时等临时性问题
+    'RETRY_TIMES': 3,  # 重试3次
+    # 包含超时状态码和常见的反爬状态码
+    'RETRY_HTTP_CODES': [408, 440, 444, 460, 463, 494, 495, 496, 499, 500, 502, 503, 504],
+    'RETRY_ENABLED': True,
 }
 
