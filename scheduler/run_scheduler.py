@@ -11,6 +11,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from pytz import timezone
 
+# 获取项目根目录（scheduler 的父目录）
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
 # 导入邮件通知模块
 try:
     from email_notifier import EmailNotifier, StatisticsCollector
@@ -39,6 +43,7 @@ stats_collector = None
 consecutive_failures = 0
 error_rates = deque(maxlen=100)  # 保存最近100次执行的错误率
 spider_start_time = None
+first_run_completed = False  # 标记是否已完成第一次爬虫
 
 # 加载配置文件
 def load_config():
@@ -108,7 +113,7 @@ def signal_handler(signum, frame):
 
 def run_spider():
     """执行爬虫任务，带重试机制和状态监控"""
-    global spider_process, consecutive_failures, spider_start_time, error_rates
+    global spider_process, consecutive_failures, spider_start_time, error_rates, first_run_completed
 
     # 检查是否有关闭请求
     if shutdown_requested:
@@ -123,6 +128,7 @@ def run_spider():
     spider_start_time = datetime.now()
     execution_success = False
     error_output = []
+    spider_stats = None
 
     try:
         logger.info("=" * 60)
@@ -132,7 +138,7 @@ def run_spider():
         # 使用Popen代替run()，避免阻塞
         spider_process = subprocess.Popen(
             ["scrapy", "crawl", "nga"],
-            cwd="/home/shan/NGA_Scrapy",
+            cwd=PROJECT_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -142,12 +148,44 @@ def run_spider():
         # 实时输出爬虫日志
         logger.info(f"爬虫进程已启动，PID: {spider_process.pid}")
 
-        # 等待进程完成并记录输出
+        # 等待进程完成并记录输出，同时解析统计信息
         output_lines = []
+        stats_dict_str = ""  # 用于累积统计字典的字符串
+        in_stats_section = False  # 是否在统计字典部分
+
         for line in spider_process.stdout:
-            output_lines.append(line.strip())
-            if line.strip():
-                logger.info(f"[Spider] {line.strip()}")
+            line_stripped = line.strip()
+            output_lines.append(line_stripped)
+
+            if line_stripped:
+                logger.info(f"[Spider] {line_stripped}")
+
+            # 检测统计信息部分的开始
+            if "Dumping Scrapy stats:" in line_stripped:
+                in_stats_section = True
+                continue
+
+            # 如果在统计部分，累积字典字符串
+            if in_stats_section:
+                stats_dict_str += line_stripped
+
+                # 如果遇到完整的字典（以}结尾），尝试解析
+                if line_stripped.endswith("}"):
+                    try:
+                        import ast
+                        spider_stats = ast.literal_eval(stats_dict_str)
+                        logger.info(f"✅ 成功解析爬虫统计信息:")
+                        logger.info(f"   - 抓取项目数: {spider_stats.get('item_scraped_count', 0)}")
+                        logger.info(f"   - 下载页面数: {spider_stats.get('downloader/response_count', 0)}")
+                        logger.info(f"   - 运行时间: {spider_stats.get('elapsed_time_seconds', 0):.2f}秒")
+                        logger.info(f"   - 完成状态: {spider_stats.get('finish_reason', 'unknown')}")
+                    except (ValueError, SyntaxError) as e:
+                        logger.warning(f"⚠️ 统计信息解析失败: {e}")
+                        logger.debug(f"原始数据: {stats_dict_str}")
+
+                    # 重置状态
+                    in_stats_section = False
+                    stats_dict_str = ""
 
         # 等待进程结束
         return_code = spider_process.wait()
@@ -158,6 +196,12 @@ def run_spider():
             logger.info("=" * 60)
             execution_success = True
             consecutive_failures = 0  # 重置连续失败计数
+
+            # 如果是第一次成功执行，发送统计报告
+            if not first_run_completed:
+                logger.info("第一次爬虫执行成功，开始发送统计报告...")
+                send_statistics_report()
+                first_run_completed = True
         else:
             logger.error(f"爬虫任务执行失败，返回码: {return_code}")
             consecutive_failures += 1
@@ -169,6 +213,22 @@ def run_spider():
                     logger.error(f"  {line}")
 
         spider_process = None
+
+        # 尝试从日志文件中获取统计信息（更可靠的方法）
+        if not spider_stats:
+            spider_stats = _parse_stats_from_log()
+            if spider_stats:
+                logger.info(f"✅ 从日志文件中成功解析爬虫统计信息:")
+                logger.info(f"   - 抓取项目数: {spider_stats.get('item_scraped_count', 0)}")
+                logger.info(f"   - 下载页面数: {spider_stats.get('downloader/response_count', 0)}")
+                logger.info(f"   - 运行时间: {spider_stats.get('elapsed_time_seconds', 0):.2f}秒")
+                logger.info(f"   - 完成状态: {spider_stats.get('finish_reason', 'unknown')}")
+
+        # 保存统计信息到文件
+        if spider_stats:
+            _save_spider_statistics(spider_stats, return_code, execution_success)
+        else:
+            logger.warning("⚠️ 未获取到爬虫统计信息")
 
         # 计算错误率（简化计算：基于返回码）
         error_rate = 0 if return_code == 0 else 100
@@ -188,6 +248,113 @@ def run_spider():
 
         # 检查错误告警条件
         check_error_alerts(-1, error_output)
+
+
+def _parse_stats_from_log():
+    """从日志文件中解析最新的爬虫统计信息"""
+    try:
+        import re
+        import ast
+
+        log_file = os.path.join(PROJECT_ROOT, "nga_spider.log")
+        if not os.path.exists(log_file):
+            logger.debug(f"日志文件不存在: {log_file}")
+            return None
+
+        # 读取日志文件的最后200行（避免读取整个大文件）
+        with open(log_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # 寻找最后的 "Dumping Scrapy stats:" 行
+        stats_line_idx = None
+        for i in range(len(lines) - 1, -1, -1):
+            if "Dumping Scrapy stats:" in lines[i]:
+                stats_line_idx = i
+                break
+
+        if stats_line_idx is None:
+            logger.debug("未找到统计信息行")
+            return None
+
+        # 收集从统计行开始的所有行，直到遇到空行或非字典格式
+        stats_lines = []
+        for i in range(stats_line_idx, len(lines)):
+            line = lines[i].strip()
+            if not line:
+                break
+            stats_lines.append(line)
+
+        # 合并所有行
+        stats_text = " ".join(stats_lines)
+
+        # 提取字典部分（寻找以 { 开始以 } 结束的部分）
+        # 使用正则表达式匹配完整的字典
+        dict_pattern = r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"
+        match = re.search(dict_pattern, stats_text)
+
+        if match:
+            stats_dict_str = match.group(0)
+            try:
+                # 清理字符串，替换 Python 特定的类型标记
+                stats_dict_str = stats_dict_str.replace("datetime.datetime", "")
+                stats_dict_str = stats_dict_str.replace("datetime.timezone", "")
+                stats_dict_str = re.sub(r"tzinfo=[^,)]*", "", stats_dict_str)
+
+                # 尝试解析
+                stats_dict = ast.literal_eval(stats_dict_str)
+                logger.debug(f"✅ 成功从日志解析统计信息")
+                return stats_dict
+            except (ValueError, SyntaxError) as e:
+                logger.debug(f"⚠️ 统计信息解析失败: {e}")
+                logger.debug(f"原始数据: {stats_dict_str[:200]}")
+                return None
+        else:
+            logger.debug("未找到统计字典格式")
+            return None
+
+    except Exception as e:
+        logger.debug(f"解析日志文件时发生错误: {e}")
+        return None
+
+def _save_spider_statistics(stats: dict, return_code: int, success: bool):
+    """保存爬虫统计信息到文件"""
+    try:
+        import os
+        import json
+        from datetime import datetime
+
+        # 创建统计目录
+        stats_dir = os.path.join(SCRIPT_DIR, "stats")
+        os.makedirs(stats_dir, exist_ok=True)
+
+        # 生成文件名（包含时间戳）
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        stats_file = os.path.join(stats_dir, f"spider_stats_{timestamp}.json")
+
+        # 准备要保存的数据
+        stats_data = {
+            'timestamp': datetime.now().isoformat(),
+            'return_code': return_code,
+            'success': success,
+            'spider_stats': stats,
+            'summary': {
+                'items_scraped': stats.get('item_scraped_count', 0),
+                'pages_crawled': stats.get('downloader/response_count', 0),
+                'runtime_seconds': stats.get('elapsed_time_seconds', 0),
+                'response_bytes': stats.get('downloader/response_bytes', 0),
+                'finish_reason': stats.get('finish_reason', 'unknown'),
+                'success_rate': 100.0 if success else 0.0,
+            }
+        }
+
+        # 保存到文件
+        with open(stats_file, 'w', encoding='utf-8') as f:
+            json.dump(stats_data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"✅ 统计信息已保存到: {stats_file}")
+
+    except Exception as e:
+        logger.exception(f"❌ 保存统计信息失败: {e}")
 
 def check_error_alerts(return_code: int, error_output: list):
     """检查是否需要发送错误告警"""
@@ -279,6 +446,12 @@ def job_listener(event):
         logger.info(f"任务执行成功: {event.job_id}")
 
 if __name__ == '__main__':
+    # 启动时清空日志文件
+    log_file = os.path.join(os.path.dirname(__file__), 'scheduler.log')
+    if os.path.exists(log_file):
+        open(log_file, 'w', encoding='utf-8').close()
+        print(f"已清空日志文件: {log_file}")
+
     # 注册信号处理器
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -302,7 +475,7 @@ if __name__ == '__main__':
             "启用" if config.get('notifications', {}).get('enable_statistics_report') else "禁用"
         ))
         if config.get('notifications', {}).get('enable_statistics_report'):
-            logger.info("  - 早期统计报告: 启用（启动后10小时发送）")
+            logger.info("  - 首次统计报告: 将在第一次爬虫成功后发送")
         logger.info("  - 错误告警: {}".format(
             "启用" if config.get('notifications', {}).get('enable_error_alerts') else "禁用"
         ))
@@ -348,17 +521,7 @@ if __name__ == '__main__':
             timezone=tz
         )
         logger.info(f"统计报告任务已添加: 每 {interval_days} 天执行一次，时间: {report_time}")
-
-        # 添加10小时后的统计报告任务（一次性）
-        ten_hours_later = datetime.now(tz) + timedelta(hours=10)
-        scheduler.add_job(
-            send_statistics_report,
-            'date',
-            run_date=ten_hours_later,
-            id='early_statistics_report_job',
-            replace_existing=True
-        )
-        logger.info(f"早期统计报告任务已添加: {ten_hours_later} 执行（启动后10小时）")
+        logger.info("首次统计报告将在第一次爬虫成功后自动发送")
 
     # 添加任务监听器
     scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)

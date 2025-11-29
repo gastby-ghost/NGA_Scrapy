@@ -105,6 +105,9 @@ class NgaSpider(scrapy.Spider):
     
     def __init__(self, *args, **kwargs):
         super(NgaSpider, self).__init__(*args, **kwargs)
+        # 不再在启动时清空日志文件，让Scrapy的日志轮转机制处理
+        # 调度器需要读取日志文件获取统计信息，清空会导致数据丢失
+
         # 缓存主题的最新回复时间，减少数据库查询
         self.topic_last_reply_cache = {}
         # 数据库相关属性

@@ -44,7 +44,7 @@ custom_settings = {
     'CONCURRENT_REQUESTS': 16,  # 默认 16，根据目标网站承受能力调整
     'DOWNLOAD_DELAY': 0,     # 适当降低延迟
     'AUTOTHROTTLE_ENABLED': True,  # 启用自动限速
-    'HTTPCACHE_ENABLED': True,
+    'HTTPCACHE_ENABLED': False,
     'HTTPCACHE_EXPIRATION_SECS': 186400,  # 缓存 1 天
     'IMAGES_PIPELINE_MAX_SIZE': 1024*1024*5  # 限制最大图片尺寸(5MB)
 }

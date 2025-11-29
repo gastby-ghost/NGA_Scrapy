@@ -16,6 +16,10 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# 获取项目根目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
 
 class EmailNotifier:
     """SMTP邮件发送器"""
@@ -125,6 +129,9 @@ class EmailNotifier:
         Returns:
             bool: 发送是否成功
         """
+        # 计算下载数据大小（MB）
+        downloaded_mb = stats.get('response_bytes', 0) / (1024 * 1024)
+
         # 格式化邮件内容
         subject = f"NGA爬虫数据统计报告 - {datetime.now().strftime('%Y-%m-%d')}"
 
@@ -135,22 +142,25 @@ class EmailNotifier:
             "=" * 60,
             f"报告时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
-            "📊 数据统计:",
-            f"  - 新增主题数: {stats.get('new_topics', 0)}",
-            f"  - 新增回复数: {stats.get('new_replies', 0)}",
-            f"  - 新增用户数: {stats.get('new_users', 0)}",
-            f"  - 下载图片数: {stats.get('downloaded_images', 0)}",
+            "📊 爬取统计:",
+            f"  - 抓取项目总数: {stats.get('items_scraped', 0)}",
+            f"  - 爬取页面总数: {stats.get('pages_crawled', 0)}",
+            f"  - 去重过滤数: {stats.get('dupefilter_filtered', 0)}",
             "",
-            "⏱️ 运行统计:",
-            f"  - 爬取页面数: {stats.get('pages_crawled', 0)}",
-            f"  - 请求成功数: {stats.get('requests_success', 0)}",
-            f"  - 请求失败数: {stats.get('requests_failed', 0)}",
-            f"  - 平均响应时间: {stats.get('avg_response_time', 0):.2f}秒",
+            "📈 运行统计:",
+            f"  - 总执行次数: {stats.get('total_runs', 0)}",
+            f"  - 成功执行次数: {stats.get('successful_runs', 0)}",
+            f"  - 失败执行次数: {stats.get('failed_runs', 0)}",
+            f"  - 总运行时间: {stats.get('total_runtime', 0):.2f}秒",
+            f"  - 平均执行时间: {stats.get('avg_runtime', 0):.2f}秒/次",
             "",
-            "⚠️ 错误统计:",
-            f"  - HTTP错误: {stats.get('http_errors', 0)}",
-            f"  - 解析错误: {stats.get('parse_errors', 0)}",
-            f"  - 数据库错误: {stats.get('db_errors', 0)}",
+            "💾 资源消耗:",
+            f"  - 下载数据总量: {downloaded_mb:.2f} MB",
+            f"  - 平均下载速度: {stats.get('avg_download_speed', 0):.2f} MB/次",
+            "",
+            "✅ 执行状态:",
+            f"  - 执行成功率: {stats.get('success_rate', 0):.1f}%",
+            f"  - 最近执行状态: {stats.get('latest_status', 'unknown')}",
             "",
             "=" * 60,
         ]
@@ -168,11 +178,9 @@ class EmailNotifier:
                 .stat-item {{ margin: 5px 0; }}
                 .label {{ font-weight: bold; color: #555; }}
                 .value {{ color: #2980b9; }}
-                .warning {{ color: #e74c3c; }}
                 .success {{ color: #27ae60; }}
-                table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-                th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-                th {{ background-color: #3498db; color: white; }}
+                .warning {{ color: #e74c3c; }}
+                .info {{ color: #3498db; }}
                 .footer {{ margin-top: 30px; font-size: 12px; color: #7f8c8d; }}
             </style>
         </head>
@@ -180,27 +188,32 @@ class EmailNotifier:
             <h1>📊 NGA爬虫数据统计报告</h1>
             <p><strong>报告时间:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
 
-            <h2>📈 数据统计</h2>
+            <h2>📈 爬取统计</h2>
             <div class="stat-box">
-                <div class="stat-item"><span class="label">新增主题数:</span> <span class="value">{stats.get('new_topics', 0)}</span></div>
-                <div class="stat-item"><span class="label">新增回复数:</span> <span class="value">{stats.get('new_replies', 0)}</span></div>
-                <div class="stat-item"><span class="label">新增用户数:</span> <span class="value">{stats.get('new_users', 0)}</span></div>
-                <div class="stat-item"><span class="label">下载图片数:</span> <span class="value">{stats.get('downloaded_images', 0)}</span></div>
+                <div class="stat-item"><span class="label">抓取项目总数:</span> <span class="value">{stats.get('items_scraped', 0)}</span></div>
+                <div class="stat-item"><span class="label">爬取页面总数:</span> <span class="value">{stats.get('pages_crawled', 0)}</span></div>
+                <div class="stat-item"><span class="label">去重过滤数:</span> <span class="value">{stats.get('dupefilter_filtered', 0)}</span></div>
             </div>
 
             <h2>⏱️ 运行统计</h2>
             <div class="stat-box">
-                <div class="stat-item"><span class="label">爬取页面数:</span> <span class="value">{stats.get('pages_crawled', 0)}</span></div>
-                <div class="stat-item"><span class="label">请求成功数:</span> <span class="value success">{stats.get('requests_success', 0)}</span></div>
-                <div class="stat-item"><span class="label">请求失败数:</span> <span class="value warning">{stats.get('requests_failed', 0)}</span></div>
-                <div class="stat-item"><span class="label">平均响应时间:</span> <span class="value">{stats.get('avg_response_time', 0):.2f}秒</span></div>
+                <div class="stat-item"><span class="label">总执行次数:</span> <span class="value">{stats.get('total_runs', 0)}</span></div>
+                <div class="stat-item"><span class="label">成功执行次数:</span> <span class="value success">{stats.get('successful_runs', 0)}</span></div>
+                <div class="stat-item"><span class="label">失败执行次数:</span> <span class="value warning">{stats.get('failed_runs', 0)}</span></div>
+                <div class="stat-item"><span class="label">总运行时间:</span> <span class="value">{stats.get('total_runtime', 0):.2f}秒</span></div>
+                <div class="stat-item"><span class="label">平均执行时间:</span> <span class="value">{stats.get('avg_runtime', 0):.2f}秒/次</span></div>
             </div>
 
-            <h2>⚠️ 错误统计</h2>
+            <h2>💾 资源消耗</h2>
             <div class="stat-box">
-                <div class="stat-item"><span class="label">HTTP错误:</span> <span class="value warning">{stats.get('http_errors', 0)}</span></div>
-                <div class="stat-item"><span class="label">解析错误:</span> <span class="value warning">{stats.get('parse_errors', 0)}</span></div>
-                <div class="stat-item"><span class="label">数据库错误:</span> <span class="value warning">{stats.get('db_errors', 0)}</span></div>
+                <div class="stat-item"><span class="label">下载数据总量:</span> <span class="value">{downloaded_mb:.2f} MB</span></div>
+                <div class="stat-item"><span class="label">平均下载速度:</span> <span class="value">{stats.get('avg_download_speed', 0):.2f} MB/次</span></div>
+            </div>
+
+            <h2>✅ 执行状态</h2>
+            <div class="stat-box">
+                <div class="stat-item"><span class="label">执行成功率:</span> <span class="value success">{stats.get('success_rate', 0):.1f}%</span></div>
+                <div class="stat-item"><span class="label">最近执行状态:</span> <span class="value info">{stats.get('latest_status', 'unknown')}</span></div>
             </div>
 
             <div class="footer">
@@ -297,8 +310,8 @@ class EmailNotifier:
 class StatisticsCollector:
     """统计数据收集器"""
 
-    def __init__(self, log_file: str = "/home/shan/NGA_Scrapy/nga_spider.log"):
-        self.log_file = log_file
+    def __init__(self, stats_dir: str = None):
+        self.stats_dir = stats_dir or os.path.join(SCRIPT_DIR, "stats")
         self.stats_cache_file = "/tmp/nga_spider_stats.json"
 
     def collect_statistics(self, start_date: datetime, end_date: datetime) -> Dict:
@@ -313,8 +326,8 @@ class StatisticsCollector:
             Dict: 统计数据
         """
         try:
-            # 从日志文件解析统计信息
-            stats = self._parse_log_statistics(start_date, end_date)
+            # 从 JSON 统计文件解析统计信息
+            stats = self._parse_json_statistics(start_date, end_date)
 
             # 缓存统计数据
             self._cache_statistics(stats)
@@ -324,62 +337,109 @@ class StatisticsCollector:
             logger.exception(f"收集统计数据时发生错误: {e}")
             return {}
 
-    def _parse_log_statistics(self, start_date: datetime, end_date: datetime) -> Dict:
-        """从日志文件解析统计信息"""
-        stats = {
-            'new_topics': 0,
-            'new_replies': 0,
-            'new_users': 0,
-            'downloaded_images': 0,
+    def _parse_json_statistics(self, start_date: datetime, end_date: datetime) -> Dict:
+        """从 JSON 统计文件解析统计信息"""
+        aggregated_stats = {
+            'items_scraped': 0,
             'pages_crawled': 0,
-            'requests_success': 0,
-            'requests_failed': 0,
-            'http_errors': 0,
-            'parse_errors': 0,
-            'db_errors': 0,
-            'avg_response_time': 0.0,
+            'dupefilter_filtered': 0,
+            'response_bytes': 0,
+            'total_runtime': 0.0,
+            'total_runs': 0,
+            'successful_runs': 0,
+            'failed_runs': 0,
         }
 
-        # 如果日志文件不存在，返回默认统计
-        if not os.path.exists(self.log_file):
-            return stats
+        # 如果统计目录不存在，返回默认统计
+        if not os.path.exists(self.stats_dir):
+            logger.warning(f"统计目录不存在: {self.stats_dir}")
+            return aggregated_stats
 
         try:
-            with open(self.log_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            import glob
+            from datetime import datetime as dt
 
-            response_times = []
+            # 获取所有统计文件
+            stats_files = glob.glob(os.path.join(self.stats_dir, "spider_stats_*.json"))
 
-            for line in lines:
-                # 解析日志行并统计
-                if 'Spider' in line:
-                    # 统计爬虫相关信息
-                    if 'crawled' in line.lower():
-                        stats['pages_crawled'] += line.count('crawled')
-                    if 'downloaded' in line.lower():
-                        stats['downloaded_images'] += line.count('downloaded')
+            if not stats_files:
+                logger.warning(f"未找到统计文件: {self.stats_dir}")
+                return aggregated_stats
 
-                # 统计错误
-                if 'ERROR' in line:
-                    if 'http' in line.lower():
-                        stats['http_errors'] += 1
-                    if 'parse' in line.lower():
-                        stats['parse_errors'] += 1
-                    if 'database' in line.lower() or 'db' in line.lower():
-                        stats['db_errors'] += 1
+            logger.info(f"找到 {len(stats_files)} 个统计文件")
 
-            # 计算平均响应时间
-            if response_times:
-                stats['avg_response_time'] = sum(response_times) / len(response_times)
+            file_count = 0
+            latest_status = 'unknown'
 
-            # 从日志中提取更多统计信息（简化版）
-            stats['requests_success'] = stats['pages_crawled']  # 假设每个页面都是一个请求
-            stats['requests_failed'] = stats['http_errors']
+            for stats_file in stats_files:
+                try:
+                    with open(stats_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+
+                    # 解析文件时间戳
+                    file_timestamp = dt.fromisoformat(data['timestamp'])
+
+                    # 检查时间范围
+                    if start_date <= file_timestamp <= end_date:
+                        file_count += 1
+                        aggregated_stats['total_runs'] += 1
+
+                        # 更新最新状态
+                        latest_status = '成功' if data.get('success', False) else '失败'
+
+                        # 聚合统计数据
+                        spider_stats = data.get('spider_stats', {})
+                        summary = data.get('summary', {})
+
+                        # 累加关键指标
+                        aggregated_stats['items_scraped'] += spider_stats.get('item_scraped_count', 0)
+                        aggregated_stats['pages_crawled'] += spider_stats.get('downloader/response_count', 0)
+                        aggregated_stats['dupefilter_filtered'] += spider_stats.get('dupefilter/filtered', 0)
+                        aggregated_stats['response_bytes'] += spider_stats.get('downloader/response_bytes', 0)
+
+                        # 统计成功/失败
+                        if data.get('success', False):
+                            aggregated_stats['successful_runs'] += 1
+                        else:
+                            aggregated_stats['failed_runs'] += 1
+
+                        # 累加运行时间
+                        runtime = spider_stats.get('elapsed_time_seconds', 0) or summary.get('runtime_seconds', 0)
+                        aggregated_stats['total_runtime'] += runtime
+
+                except Exception as e:
+                    logger.warning(f"解析统计文件 {stats_file} 时发生错误: {e}")
+                    continue
+
+            # 计算衍生指标
+            if aggregated_stats['total_runs'] > 0:
+                # 平均运行时间
+                aggregated_stats['avg_runtime'] = aggregated_stats['total_runtime'] / aggregated_stats['total_runs']
+                # 成功率
+                aggregated_stats['success_rate'] = (aggregated_stats['successful_runs'] / aggregated_stats['total_runs']) * 100
+                # 平均下载速度 (MB/次)
+                if aggregated_stats['total_runs'] > 0:
+                    avg_bytes = aggregated_stats['response_bytes'] / aggregated_stats['total_runs']
+                    aggregated_stats['avg_download_speed'] = avg_bytes / (1024 * 1024)
+            else:
+                aggregated_stats['avg_runtime'] = 0.0
+                aggregated_stats['success_rate'] = 0.0
+                aggregated_stats['avg_download_speed'] = 0.0
+
+            # 添加最新状态
+            aggregated_stats['latest_status'] = latest_status
+
+            logger.info(f"成功聚合了 {file_count} 个统计文件的数据")
+            logger.info(f"统计汇总: 总执行次数={aggregated_stats['total_runs']}, "
+                       f"成功={aggregated_stats['successful_runs']}, "
+                       f"失败={aggregated_stats['failed_runs']}")
+            logger.info(f"累计抓取项目: {aggregated_stats['items_scraped']}, "
+                       f"累计爬取页面: {aggregated_stats['pages_crawled']}")
 
         except Exception as e:
-            logger.exception(f"解析日志文件时发生错误: {e}")
+            logger.exception(f"解析 JSON 统计文件时发生错误: {e}")
 
-        return stats
+        return aggregated_stats
 
     def _cache_statistics(self, stats: Dict):
         """缓存统计数据"""

@@ -77,3 +77,5 @@ playwright-report/
 test-results/
 
 scheduler/email_config.yaml
+scheduler/stats
+.scrapy
