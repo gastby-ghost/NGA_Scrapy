@@ -67,7 +67,24 @@ cd scheduler
 python run_scheduler.py
 ```
 
-Default runs every 30 minutes.
+Default runs every 30 minutes. Configure email notifications by editing `scheduler/email_config.yaml`.
+
+### Email Configuration (Optional)
+
+Configure email notifications for statistics reports and error alerts:
+
+```bash
+# Copy and edit the email config
+cd scheduler
+# Edit email_config.yaml with your SMTP settings
+# For QQ Mail: Use app-specific password from mail settings
+```
+
+Configure:
+- SMTP server settings (host, port, credentials)
+- Recipient email addresses
+- Statistics report interval (default: every 3 days at 09:00)
+- Error alert thresholds (consecutive failures, timeout, error rate)
 
 ## High-Level Architecture
 
@@ -104,6 +121,19 @@ Default runs every 30 minutes.
    - `create_db_session()`: Creates SQLAlchemy session factory
    - Supports custom database URLs
 
+7. **Email Notification System** (`scheduler/email_notifier.py:1-462`)
+   - `EmailNotifier`: SMTP email sender with TLS support
+   - `StatisticsCollector`: Aggregates spider statistics from JSON files
+   - Supports HTML and plain text email formats
+   - Handles statistics reports and error alerts
+
+8. **Enhanced Scheduler** (`scheduler/run_scheduler.py:1-553`)
+   - APScheduler-based with background execution
+   - Real-time spider output logging with statistics parsing
+   - Saves spider statistics to JSON files in `scheduler/stats/`
+   - Graceful shutdown handling (SIGINT/SIGTERM)
+   - Error monitoring with consecutive failure tracking
+
 ### Key Features
 
 **Incremental Crawling** (`NGA_Scrapy/spiders/nga_spider.py:362-372`)
@@ -121,20 +151,66 @@ Default runs every 30 minutes.
 - Downloads and stores images locally (`NGA_Scrapy/pipelines.py:195-225`)
 - Saves original URLs and local paths to database
 
-**Scheduler** (`scheduler/run_scheduler.py:1-29`)
-- APScheduler-based periodic execution
-- Default interval: 30 minutes
-- Uses subprocess to run scrapy command
+**Email Notifications** (`scheduler/email_notifier.py:24-307`)
+- **Statistics Reports**: Automated periodic reports (configurable, default every 3 days)
+  - Crawl statistics (items scraped, pages crawled, duplication filtered)
+  - Execution metrics (success rate, avg runtime, total executions)
+  - Resource usage (download volume, average speed)
+  - First report sent immediately after initial successful crawl
+- **Error Alerts**: Real-time notifications for anomalies
+  - Consecutive failures (default: 3+ failures)
+  - Spider timeout (default: 60+ minutes)
+  - High error rate (default: >20% in sliding window)
+- HTML and plain text email formats with styling
+
+**Statistics Tracking** (`scheduler/run_scheduler.py:319-357`)
+- Saves spider statistics to timestamped JSON files (`scheduler/stats/spider_stats_*.json`)
+- Aggregates metrics across time ranges
+- Includes execution status, runtime, items scraped, response bytes
+- Supports historical analysis and trending
+
+**Enhanced Scheduler** (`scheduler/run_scheduler.py:114-251`)
+- Real-time spider output monitoring and logging
+- Parses Scrapy statistics from stdout and log files
+- Graceful shutdown with signal handling
+- Background execution with APScheduler
+- Configurable via YAML (`scheduler/email_config.yaml`)
 
 ## Configuration
 
-Key settings in `NGA_Scrapy/settings.py:22-51`:
+### Spider Settings (`NGA_Scrapy/settings.py`)
 
 - `PLAYWRIGHT_POOL_SIZE`: Browser instance pool size (default: 6)
 - `DOWNLOAD_TIMEOUT`: Global timeout (default: 20 seconds)
-- `IMAGES_STORE`: Image storage path (default: `/download_images`)
+- `IMAGES_STORE`: Image storage path (default: `download_images`)
 - `CONCURRENT_REQUESTS`: Concurrent requests (default: 16)
-- `HTTPCACHE_ENABLED`: HTTP caching enabled (default: True)
+- `HTTPCACHE_ENABLED`: HTTP caching (default: False)
+- `LOG_LEVEL`: Logging level (default: INFO)
+- `LOG_FILE`: Log file path (default: `nga_spider.log`)
+- `LOG_FILE_MAX_BYTES`: Log rotation size (default: 10MB)
+- `LOG_FILE_BACKUP_COUNT`: Number of log backups (default: 5)
+
+### Email Notification Settings (`scheduler/email_config.yaml`)
+
+**SMTP Configuration:**
+- `smtp_server`: SMTP server address (e.g., `smtp.qq.com`)
+- `smtp_port`: SMTP port (587 for TLS, 465 for SSL)
+- `username`: SMTP username
+- `password`: SMTP password or app-specific password
+- `from_email`: Sender email address
+- `to_emails`: List of recipient email addresses
+- `use_tls`: Enable TLS encryption (default: true)
+
+**Notification Settings:**
+- `enable_statistics_report`: Enable periodic statistics reports (default: true)
+- `statistics_report_interval_days`: Report frequency in days (default: 3)
+- `statistics_report_time`: Report time in HH:MM format (default: "09:00")
+- `enable_error_alerts`: Enable error notifications (default: true)
+- `consecutive_failures_threshold`: Alert after N consecutive failures (default: 3)
+- `spider_timeout_minutes`: Timeout threshold in minutes (default: 60)
+- `error_rate_alert.enabled`: Enable error rate alerts (default: true)
+- `error_rate_alert.threshold_percent`: Error rate threshold percentage (default: 10)
+- `error_rate_alert.time_window_minutes`: Time window for rate calculation (default: 30)
 
 ## Database Schema
 
@@ -148,3 +224,10 @@ Key settings in `NGA_Scrapy/settings.py:22-51`:
 - Time parsing supports multiple NGA formats (`NGA_Scrapy/spiders/nga_spider.py:374-400`)
 - Cookie management via `cookies.txt` file, loaded in middleware (`NGA_Scrapy/middlewares.py:213-282`)
 - Logs written to `nga_spider.log` with rotation (10MB max, 5 backups)
+- Scheduler logs written to `scheduler/scheduler.log`
+- Spider statistics saved to `scheduler/stats/spider_stats_YYYYMMDD_HHMMSS.json`
+- Email notifications require valid SMTP credentials in `scheduler/email_config.yaml`
+- For QQ Mail: Enable SMTP service and use app-specific password, not QQ password
+- Statistics reports sent immediately after first successful crawl, then on configured schedule
+- Scheduler handles graceful shutdown with Ctrl+C (SIGINT) or SIGTERM
+- Background processes can be killed, but the scheduler will detect and skip if spider is still running

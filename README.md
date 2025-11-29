@@ -15,6 +15,8 @@ NGA_Scrapy是一个功能完善的网络爬虫项目，专门针对NGA论坛（b
 - **图片下载**：自动下载回复中的图片并保存到本地
 - **Cookie管理**：支持登录状态下的数据爬取
 - **定时调度**：支持定时自动执行爬取任务
+- **邮件通知**：自动发送统计报告和错误告警邮件
+- **数据统计**：自动收集并保存爬虫运行统计数据
 
 ## 技术栈和依赖
 
@@ -24,11 +26,13 @@ NGA_Scrapy是一个功能完善的网络爬虫项目，专门针对NGA论坛（b
 - **SQLite**：默认数据库（可配置其他数据库）
 - **APScheduler**：定时任务调度器
 - **Selenium**：用于获取Cookie的浏览器自动化工具
+- **PyYAML**：YAML配置文件解析
+- **smtplib**：邮件发送功能（Python标准库）
 
 ### 依赖安装
 
 ```bash
-pip install scrapy sqlalchemy playwright apscheduler selenium psutil
+pip install scrapy sqlalchemy playwright apscheduler selenium psutil pyyaml pytz
 playwright install chromium
 ```
 
@@ -37,6 +41,7 @@ playwright install chromium
 ```
 NGA_Scrapy/
 ├── README.md                    # 项目说明文档
+├── CLAUDE.md                    # Claude Code 指导文档
 ├── scrapy.cfg                   # Scrapy项目配置文件
 ├── get_cookies.py               # Cookie获取工具
 ├── init_db.py                   # 数据库初始化脚本
@@ -54,7 +59,12 @@ NGA_Scrapy/
 │       └── db_utils.py          # 数据库工具
 └── scheduler/                   # 定时调度器
     ├── requirements.txt         # 调度器依赖
-    └── run_scheduler.py         # 调度器主程序
+    ├── run_scheduler.py         # 调度器主程序
+    ├── email_notifier.py        # 邮件通知模块
+    ├── email_config.yaml        # 邮件配置文件
+    ├── scheduler.log            # 调度器日志（运行时生成）
+    └── stats/                   # 统计数据目录（运行时生成）
+        └── spider_stats_*.json  # 爬虫统计文件
 ```
 
 ## 虚拟环境设置
@@ -294,23 +304,70 @@ sudo supervisorctl status nga-scraper
 
 ### 邮件通知功能说明
 
+爬虫调度器支持自动发送邮件通知，包括定期统计报告和实时错误告警。
+
+#### 配置邮件通知
+
+编辑 `scheduler/email_config.yaml` 文件，配置SMTP服务器和通知选项：
+
+```yaml
+# SMTP服务器配置（以QQ邮箱为例）
+smtp_server: "smtp.qq.com"
+smtp_port: 587
+username: "your_email@qq.com"
+password: "your_app_password"  # QQ邮箱授权码，非QQ密码
+from_email: "your_email@qq.com"
+to_emails:
+  - "recipient@example.com"
+use_tls: true
+
+# 通知设置
+notifications:
+  enable_statistics_report: true
+  statistics_report_interval_days: 3
+  statistics_report_time: "09:00"
+  enable_error_alerts: true
+  consecutive_failures_threshold: 3
+  spider_timeout_minutes: 60
+  error_rate_alert:
+    enabled: true
+    threshold_percent: 10
+    time_window_minutes: 30
+```
+
+**获取QQ邮箱授权码：**
+1. 登录QQ邮箱，进入设置→账户
+2. 找到"POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV服务"
+3. 开启"IMAP/SMTP服务"或"POP3/SMTP服务"
+4. 按提示发送短信获取授权码
+5. 将授权码填入`password`字段
+
 #### 1. 统计报告
-- **频率**：每3天发送一次（可配置）
-- **时间**：每天09:00（可配置）
-- **内容**：
-  - 新增主题数、回复数、用户数
-  - 下载图片数
-  - 爬取页面数、请求成功/失败数
-  - 平均响应时间
-  - HTTP错误、解析错误、数据库错误统计
+- **发送时机**：
+  - 首次统计报告：第一次爬虫成功执行后立即发送
+  - 定期报告：每3天09:00发送（可配置）
+- **报告内容**：
+  - **爬取统计**：抓取项目总数、爬取页面总数、去重过滤数
+  - **运行统计**：总执行次数、成功/失败次数、总运行时间、平均执行时间
+  - **资源消耗**：下载数据总量、平均下载速度
+  - **执行状态**：执行成功率、最近执行状态
+- **邮件格式**：支持HTML和纯文本两种格式，HTML版本带样式美化
 
 #### 2. 错误告警
 - **连续失败告警**：爬虫连续失败3次（可配置）时发送
 - **超时告警**：爬虫运行超过60分钟（可配置）时发送
-- **错误率告警**：最近30分钟内的平均错误率超过20%（可配置）时发送
-- **内容**：告警类型、发生时间、详细错误信息
+- **错误率告警**：平均错误率超过10%（可配置）时发送
+- **告警内容**：告警类型、发生时间、详细错误信息
+- **实时性**：错误发生后立即发送，便于及时处理
 
-### 启动带邮件通知的调度器
+#### 3. 统计数据存储
+
+爬虫每次运行的统计数据会自动保存到 `scheduler/stats/` 目录：
+- 文件格式：`spider_stats_YYYYMMDD_HHMMSS.json`
+- 包含内容：执行时间、返回码、成功状态、详细统计数据
+- 用途：用于生成统计报告和历史数据分析
+
+### 启动调度器
 
 ```bash
 cd scheduler
@@ -319,10 +376,21 @@ python run_scheduler.py
 
 启动后会显示邮件通知是否启用：
 ```
+============================================================
+NGA 爬虫调度器启动
+============================================================
 配置信息:
+  - 时区: Asia/Shanghai
+  - 执行间隔: 30 分钟
+  - 启动时间: 2025-11-29 10:00:00
+  - 日志文件: scheduler.log
   - 邮件通知: 已启用
   - 统计报告: 启用
+  - 首次统计报告: 将在第一次爬虫成功后发送
   - 错误告警: 启用
+============================================================
+按 Ctrl+C 优雅退出
+============================================================
 ```
 
 ### 查看邮件发送日志
@@ -383,6 +451,19 @@ scrapy crawl nga -a db_url="postgresql://user:password@localhost/nga_db"
 - 用户信息关联
 - 主题和回复的完整关联
 
+### 6. 智能监控和通知
+- **邮件通知系统**：自动发送统计报告和错误告警
+- **多种告警类型**：连续失败告警、超时告警、错误率告警
+- **HTML邮件美化**：支持HTML和纯文本双格式邮件
+- **首次即时报告**：第一次爬虫成功后立即发送统计报告
+- **灵活配置**：通过YAML文件配置所有通知选项
+
+### 7. 统计数据收集
+- **自动存储**：每次运行的统计数据自动保存为JSON文件
+- **数据聚合**：支持跨时间范围的数据聚合分析
+- **详细指标**：包含抓取数、响应时间、成功率等多维度指标
+- **历史追踪**：保留历史统计数据便于趋势分析
+
 ## 使用场景
 
 1. **论坛数据分析**：对NGA论坛水区的内容进行数据分析
@@ -421,14 +502,36 @@ A: 修改`start_urls`和`parse`方法中的URL参数，将`fid=-7`改为目标�
 ### Q: 数据库文件过大怎么办？
 A: 可以定期清理旧数据，或者使用其他数据库系统如MySQL、PostgreSQL等。
 
+### Q: 如何配置邮件通知？
+A: 编辑`scheduler/email_config.yaml`文件，配置SMTP服务器信息和通知选项。对于QQ邮箱，需要使用授权码而非QQ密码。详见"邮件通知功能说明"章节。
+
+### Q: 邮件通知不工作怎么办？
+A: 1) 检查`email_config.yaml`配置是否正确；2) 确认SMTP服务器地址和端口正确；3) 对于QQ邮箱，确保使用的是授权码；4) 查看`scheduler/scheduler.log`日志文件中的错误信息。
+
+### Q: 统计数据保存在哪里？
+A: 统计数据保存在`scheduler/stats/`目录下，以JSON格式存储，文件名包含时间戳。每次爬虫运行都会生成一个新的统计文件。
+
 ## 更新日志
 
+### v1.2.0 (2025-11)
+- ✨ 新增邮件通知系统（统计报告和错误告警）
+- ✨ 新增爬虫运行统计数据自动收集和保存功能
+- ✨ 新增首次成功后立即发送统计报告
+- 🔧 优化调度器，支持优雅关闭
+- 🔧 增强日志系统，实时输出爬虫运行日志
+- 📝 完善配置文件（YAML格式）
+
+### v1.1.0
+- 🔧 优化浏览器池管理
+- 🔧 改进错误处理机制
+- 📝 完善文档
+
 ### v1.0.0
-- 初始版本发布
-- 实现基本爬取功能
-- 支持增量爬取
-- 添加图片下载功能
-- 实现定时调度
+- 🎉 初始版本发布
+- ✨ 实现基本爬取功能
+- ✨ 支持增量爬取
+- ✨ 添加图片下载功能
+- ✨ 实现定时调度
 
 ---
 
