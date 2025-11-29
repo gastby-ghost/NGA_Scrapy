@@ -17,10 +17,19 @@ NGA论坛Cookie获取工具
 import time
 import json
 from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import UnexpectedAlertPresentException
 
+# 配置Chrome选项，使用Chromium
+chrome_options = Options()
+# chrome_options.add_argument('--headless')  # 如需无头模式，请取消注释此行
+chrome_options.add_argument('--no-sandbox')
+chrome_options.add_argument('--disable-dev-shm-usage')
+chrome_options.add_argument('--disable-gpu')
+chrome_options.add_argument('--disable-extensions')  # 禁用扩展
+
 # 初始化Chrome浏览器驱动
-driver = webdriver.Chrome()
+driver = webdriver.Chrome(options=chrome_options)
 
 try:
     # 访问NGA水区页面(fid=-7)
