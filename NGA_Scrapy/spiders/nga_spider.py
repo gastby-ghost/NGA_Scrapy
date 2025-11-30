@@ -149,23 +149,44 @@ class NgaSpider(scrapy.Spider):
         #super().close(reason)
     
     def print_stats(self):
+        """打印进度和性能统计信息"""
         cpu = self.process.cpu_percent(interval=1)
         mem = self.process.memory_info().rss / 1024 / 1024
-        self.logger.debug(f"CPU: {cpu}% | Memory: {mem:.2f} MB")
+        self.logger.debug(f"📊 CPU: {cpu}% | Memory: {mem:.2f} MB")
+
+        # 获取数据库统计
+        if self.db_session:
+            try:
+                from ..models import Topic, Reply, User
+                topic_count = self.db_session.query(Topic).count()
+                reply_count = self.db_session.query(Reply).count()
+                user_count = self.db_session.query(User).count()
+                self.logger.debug(f"📈 DB统计: 主题={topic_count}, 回复={reply_count}, 用户={user_count}")
+            except Exception as e:
+                self.logger.debug(f"⚠️ 获取数据库统计失败: {e}")
 
     def parse(self, response):
         # 解析主题列表页
-        pageNum=11
+        pageNum = 11
+        self.logger.info(f"🚀 开始爬取NGA论坛水区，共需爬取 {pageNum-1} 页主题列表")
         for page in range(1, pageNum):  # 爬取前pageNum页
+            self.logger.debug(f"📄 生成第 {page} 页主题列表页请求")
             yield Request(
                 url=f"https://bbs.nga.cn/thread.php?fid=-7&page={page}",
-                callback=self.parse_topic_list
+                callback=self.parse_topic_list,
+                meta={'page': page}
             )
 
     def parse_topic_list(self, response):
         # 解析主题列表
+        page = response.meta.get('page', 'unknown')
+        self.logger.debug(f"📝 开始解析第 {page} 页主题列表 (URL: {response.url})")
+
         rows = response.xpath('//*[contains(@class, "topicrow")]')
-        for row in rows:
+        self.logger.debug(f"📊 第 {page} 页主题列表共找到 {len(rows)} 个主题")
+
+        for idx, row in enumerate(rows, 1):
+            self.logger.debug(f"🔍 开始处理第 {page} 页第 {idx} 个主题")
             topic_link = row.xpath('.//a[contains(@class, "topic")]/@href').get()
             if not topic_link or 'tid=' not in topic_link:
                 continue
@@ -205,8 +226,10 @@ class NgaSpider(scrapy.Spider):
                 last_reply_date = self._extract_time_from_text(row_text)
 
             # 获取数据库中该主题的最后回复时间
+            self.logger.debug(f"🔍 主题 {tid}: 查询数据库获取最后回复时间")
             db_last_reply = self.get_last_reply_from_db(tid)
             self.topic_last_reply_cache[tid] = db_last_reply  # 存入缓存
+            self.logger.debug(f"📅 主题 {tid}: 数据库记录时间 = {db_last_reply}, 网页时间 = {last_reply_date}")
 
             # 只有当网页时间比数据库时间新时才处理
             # 注意：如果网页时间为None（解析失败），默认当作新主题处理
@@ -268,8 +291,11 @@ class NgaSpider(scrapy.Spider):
                 callback=self.parse_replies,
                 meta={'tid': tid, 'db_last_reply': db_last_reply}
             )
-            #self.print_stats() 
-            #self.logger.info(f"已获取主题 {tid} 所有对应数据")
+            #self.print_stats()
+            self.logger.debug(f"✅ 主题 {tid}: 已生成所有请求")
+
+        # 主题列表页处理完成
+        self.logger.debug(f"📄 第 {page} 页主题列表解析完成，共处理 {idx} 个主题")
 
     def get_last_reply_from_db(self, tid):
         """从数据库获取主题的最后回复时间"""
@@ -292,6 +318,11 @@ class NgaSpider(scrapy.Spider):
     def parse_replies(self, response):
         tid = response.meta['tid']
         db_last_reply = response.meta.get('db_last_reply')
+        current_page = response.meta.get('current_page', 'unknown')
+        last_page = response.meta.get('last_page', 'unknown')
+
+        self.logger.debug(f"💬 开始解析主题 {tid} 的回复 (当前页: {current_page}/{last_page}, URL: {response.url})")
+
         meta={'tid': tid}
 
         if 'last_page' not in response.meta:
@@ -312,8 +343,10 @@ class NgaSpider(scrapy.Spider):
         new_page_flag=True
 
         replies = response.xpath('//*[@class="forumbox postbox"]')
-        
-        for reply in replies:
+        self.logger.debug(f"📜 主题 {tid}: 当前页 {current_page}/{last_page} 共有 {len(replies)} 条回复")
+
+        for idx, reply in enumerate(replies, 1):
+            self.logger.debug(f"📝 主题 {tid}: 开始处理第 {idx} 条回复 (当前页 {current_page}/{last_page})")
             post_id = reply.xpath('.//*[starts-with(@id, "postcontainer")]/a[1]/@id').get()
 
             # 安全检查：如果无法获取 post_id，跳过该回复
@@ -377,10 +410,12 @@ class NgaSpider(scrapy.Spider):
                 sampling_time=self._now_time(),
                 image_urls=image_urls  # 添加图片URL列表
             )
+            self.logger.debug(f"✅ 主题 {tid}: 成功提取回复 {post_id} (时间: {post_time}, 用户: {poster_id}, 推荐值: {recommendvalue})")
             yield reply_item
-            
+
             # 请求用户信息
             if poster_id:
+                self.logger.debug(f"👤 主题 {tid}: 为用户 {poster_id} 生成UserItem")
                 user_item=UserItem(
                     uid=poster_id,
                     user_group='',
@@ -395,15 +430,19 @@ class NgaSpider(scrapy.Spider):
                     meta={'uid': poster_id},
                     dont_filter=False
                 )'''
-        
+
+        self.logger.debug(f"📄 主题 {tid}: 页面 {current_page}/{last_page} 解析完成，准备处理上一页")
         # 处理上一页
         if new_page_flag and meta['current_page'] > 1:
             meta['current_page'] = meta['current_page'] - 1
+            self.logger.debug(f"⬅️ 主题 {tid}: 翻到上一页 {meta['current_page']} 页")
             yield Request(
                 url=f"https://bbs.nga.cn/read.php?tid={tid}&page={meta['current_page']}",
                 callback=self.parse_replies,
                 meta=meta
             )
+        else:
+            self.logger.debug(f"✅ 主题 {tid}: 所有回复页处理完成")
 
     # 其他方法保持不变...
     def parse_user(self, response):

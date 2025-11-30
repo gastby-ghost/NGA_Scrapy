@@ -264,16 +264,21 @@ class BrowserPool:
         """在Playwright工作线程中执行任务"""
         # 检查是否已收到停止信号
         if self._stop_event.is_set():
+            self.logger.warning("⚠️ 浏览器池正在关闭，任务被中断")
             raise InterruptedError("浏览器池正在关闭，任务被中断")
 
         request_id = str(uuid.uuid4())
         result_event = threading.Event()
+        task_name = getattr(task_func, '__name__', str(task_func))
+
+        self.logger.debug(f"📥 接收任务: {task_name} (ID: {request_id})")
 
         with self._condition:
             self._result_map[request_id] = None
 
         # 添加任务到队列
         self._request_queue.put((request_id, task_func, args, kwargs, result_event))
+        self.logger.debug(f"✅ 任务已添加到队列: {task_name} (ID: {request_id})")
 
         # 等待结果，使用较短的超时并检查停止事件
         timeout = 60
@@ -283,6 +288,7 @@ class BrowserPool:
         while elapsed < timeout:
             # 检查停止事件
             if self._stop_event.is_set():
+                self.logger.warning(f"⚠️ 任务执行期间收到停止信号，取消任务: {task_name} (ID: {request_id})")
                 with self._condition:
                     self._result_map.pop(request_id, None)
                 raise InterruptedError("浏览器池正在关闭，任务被中断")
@@ -292,18 +298,26 @@ class BrowserPool:
                 break
             elapsed += wait_interval
 
+            # 每10秒输出一次等待日志
+            if elapsed > 0 and elapsed % 10 == 0:
+                self.logger.debug(f"⏳ 任务仍在执行中: {task_name} (ID: {request_id})，已等待 {elapsed:.0f}s")
+
         with self._condition:
             status, result, error = self._result_map.pop(request_id, ('timeout', None, 'Timeout'))
 
             if status == 'success':
+                self.logger.debug(f"✅ 任务执行成功: {task_name} (ID: {request_id})，耗时 {elapsed:.2f}s")
                 return result
             elif status == 'canceled':
+                self.logger.warning(f"❌ 任务被取消: {task_name} (ID: {request_id})")
                 raise InterruptedError("任务被取消")
             elif status == 'error':
                 # 重新抛出原始异常（保持异常类型）
                 exc_type, exc_value, exc_traceback = error
+                self.logger.error(f"❌ 任务执行失败: {task_name} (ID: {request_id})，错误: {exc_type.__name__}: {exc_value}")
                 raise exc_type(exc_value)
             else:
+                self.logger.error(f"⏰ 任务执行超时: {task_name} (ID: {request_id})，超时时间 {timeout}s")
                 raise TimeoutError('任务执行超时')
 
     def execute(self, task_func, *args, **kwargs):
@@ -589,12 +603,15 @@ class PlaywrightMiddleware:
         try:
             # 定义浏览器任务函数
             def _fetch_page(browser_pool, url, cookies, browser_index):
-                # 轮询选择浏览器实例，避免所有请求使用同一个 context
                 browser, context = browser_pool[browser_index % len(browser_pool)]
                 page = context.new_page()
+                spider = self.spider  # 获取spider引用
 
                 try:
+                    spider.logger.debug(f"🌐 准备加载页面: {url} (使用浏览器 {browser_index % len(browser_pool)})")
+
                     if cookies:
+                        spider.logger.debug(f"🍪 设置 Cookies，共 {len(cookies)} 个")
                         # 先清除旧的 cookies
                         context.clear_cookies()
                         # 添加新的 cookies
@@ -603,13 +620,16 @@ class PlaywrightMiddleware:
                         time.sleep(0.1)
 
                     # 设置 Referer 头部，模拟从首页跳转
+                    spider.logger.debug(f"📋 设置 Referer 头部")
                     page.set_extra_http_headers({
                         'Referer': 'https://bbs.nga.cn/'
                     })
 
+                    spider.logger.debug(f"🚀 开始导航到页面...")
                     nav_start = time.time()
                     page.goto(url, wait_until="domcontentloaded", timeout=15000)
                     nav_time = time.time() - nav_start
+                    spider.logger.debug(f"✅ 页面导航完成，耗时: {nav_time:.2f}s，URL: {page.url}")
 
                     alert_start = time.time()
                     self._handle_alert(page)
@@ -618,22 +638,24 @@ class PlaywrightMiddleware:
                     load_start = time.time()
                     page.wait_for_load_state("domcontentloaded", timeout=5000)
                     load_time = time.time() - load_start
-
-                    self.logger.debug(
-                        f"页面加载分解耗时 - 导航: {nav_time:.2f}s, "
-                        f"弹窗处理: {alert_time:.2f}s, "
-                        f"等待完成: {load_time:.2f}s"
-                    )
+                    spider.logger.debug(f"⏱️ 页面加载完成: nav={nav_time:.2f}s, alert={alert_time:.2f}s, wait={load_time:.2f}s")
 
                     # 【关键改进】在返回前自动更新cookies
+                    spider.logger.debug(f"💾 更新 Cookies...")
                     self._save_cookies_if_updated(context)
+
+                    spider.logger.debug(f"📄 页面内容获取完成，字节数: {len(page.content())}")
 
                     return {
                         'url': page.url,
                         'content': page.content(),
                         'success': True
                     }
+                except Exception as e:
+                    spider.logger.error(f"❌ 页面加载失败: {url}，错误: {type(e).__name__}: {str(e)}")
+                    raise
                 finally:
+                    spider.logger.debug(f"🔒 关闭页面实例")
                     page.close()
 
             # 轮询选择浏览器实例

@@ -26,7 +26,7 @@ DOWNLOAD_TIMEOUT = 20     # 全局超时时间
 ROBOTSTXT_OBEY = False
 
 # 配置日志
-LOG_LEVEL = 'INFO'
+LOG_LEVEL = 'DEBUG'
 
 # 日志配置
 LOG_FILE = 'nga_spider.log'
