@@ -315,8 +315,27 @@ class NgaSpider(scrapy.Spider):
         
         for reply in replies:
             post_id = reply.xpath('.//*[starts-with(@id, "postcontainer")]/a[1]/@id').get()
+
+            # 安全检查：如果无法获取 post_id，跳过该回复
+            if not post_id:
+                self.logger.warning(f"无法获取 post_id，跳过该回复 (tid={tid})")
+                continue
+
+            # 统一使用纯数字格式
             if post_id == 'pid0Anchor':
-                post_id = tid + post_id
+                # 主楼使用 tid 作为 rid，纯数字格式
+                post_id = tid
+            elif 'pid' in post_id and 'Anchor' in post_id:
+                # 普通回复：从 Anchor 格式提取纯数字
+                # 例如：pid849526462Anchor → 849526462
+                post_id = post_id.replace('pid', '').replace('Anchor', '')
+            elif post_id.isdigit():
+                # 已经是纯数字格式，直接使用
+                pass
+            else:
+                # 其他未知格式，记录警告并跳过
+                self.logger.warning(f"未知的 post_id 格式: {post_id} (tid={tid})")
+                continue
                 
             poster_href = reply.xpath('.//*[starts-with(@id, "postauthor")]/@href').get()
             poster_id = poster_href.split('uid=')[1].split('&')[0] if poster_href and 'uid=' in poster_href else ''
