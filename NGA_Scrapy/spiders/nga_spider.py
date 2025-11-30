@@ -197,6 +197,7 @@ class NgaSpider(scrapy.Spider):
                 continue
                 
             poster_id = row.xpath('.//*[@class="author"]/@title').re_first(r'用户ID (\d+)')
+            poster_name = row.xpath('.//*[@class="author"]/text()').get()
             post_time = row.xpath('.//span[contains(@class, "postdate")]/@title').get()
             re_num = row.xpath('.//*[@class="replies"]/text()').get()
 
@@ -266,24 +267,19 @@ class NgaSpider(scrapy.Spider):
                 partition=partition
             )
             yield topic_item
-            #self.print_stats() 
-            #self.logger.info(f"准备获取主题 {tid} 所有对应用户")
-            # 请求用户信息 
+
+            # 创建用户信息（只包含基本信息，不发起额外请求）
             if poster_id:
-                user_item=UserItem(
-                        uid=poster_id,
-                        user_group='',
-                        reg_date='',
-                        prestige='',
-                        history_re_num='')
+                self.logger.debug(f"👤 主题 {tid}: 为用户 {poster_id} 生成UserItem")
+                user_item = UserItem(
+                    uid=poster_id,
+                    name=poster_name or '',
+                    user_group='',
+                    reg_date='',
+                    prestige='',
+                    history_re_num=''
+                )
                 yield user_item
-            '''
-            yield Request(
-                url=f"https://bbs.nga.cn/nuke.php?func=ucp&uid={poster_id}",
-                callback=self.parse_user,
-                meta={'uid': poster_id},
-                dont_filter=False
-            )'''
             #self.print_stats() 
             # 请求回复页
             yield Request(
@@ -372,6 +368,7 @@ class NgaSpider(scrapy.Spider):
                 
             poster_href = reply.xpath('.//*[starts-with(@id, "postauthor")]/@href').get()
             poster_id = poster_href.split('uid=')[1].split('&')[0] if poster_href and 'uid=' in poster_href else ''
+            poster_name = reply.xpath('.//*[starts-with(@id, "postauthor")]/text()').get()
             
             content = reply.xpath('.//*[starts-with(@id, "postcontent") '
                                  'and string-length(translate(substring(@id, 12), "0123456789", "")) = 0]/text()').get()
@@ -413,23 +410,18 @@ class NgaSpider(scrapy.Spider):
             self.logger.debug(f"✅ 主题 {tid}: 成功提取回复 {post_id} (时间: {post_time}, 用户: {poster_id}, 推荐值: {recommendvalue})")
             yield reply_item
 
-            # 请求用户信息
+            # 创建用户信息（只包含基本信息，不发起额外请求）
             if poster_id:
                 self.logger.debug(f"👤 主题 {tid}: 为用户 {poster_id} 生成UserItem")
-                user_item=UserItem(
+                user_item = UserItem(
                     uid=poster_id,
+                    name=poster_name or '',
                     user_group='',
                     reg_date='',
                     prestige='',
-                    history_re_num='')
+                    history_re_num=''
+                )
                 yield user_item
-                '''
-                yield Request(
-                    url=f"https://bbs.nga.cn/nuke.php?func=ucp&uid={poster_id}",
-                    callback=self.parse_user,
-                    meta={'uid': poster_id},
-                    dont_filter=False
-                )'''
 
         self.logger.debug(f"📄 主题 {tid}: 页面 {current_page}/{last_page} 解析完成，准备处理上一页")
         # 处理上一页
