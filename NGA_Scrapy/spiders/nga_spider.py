@@ -102,7 +102,7 @@ class NgaSpider(scrapy.Spider):
     name = 'nga'
     allowed_domains = ['bbs.nga.cn']
     start_urls = ['https://bbs.nga.cn/thread.php?fid=-7']
-    
+
     def __init__(self, *args, **kwargs):
         super(NgaSpider, self).__init__(*args, **kwargs)
         # 不再在启动时清空日志文件，让Scrapy的日志轮转机制处理
@@ -178,16 +178,54 @@ class NgaSpider(scrapy.Spider):
             poster_id = row.xpath('.//*[@class="author"]/@title').re_first(r'用户ID (\d+)')
             post_time = row.xpath('.//span[contains(@class, "postdate")]/@title').get()
             re_num = row.xpath('.//*[@class="replies"]/text()').get()
+
+            # 【增强】多种方式提取最后回复时间
+            last_reply_date = None
+
+            # 方式1: 从 .replydate 的 title 属性提取
             last_reply_date = row.xpath('.//a[contains(@class, "replydate")]/@title').get()
-            
+
+            # 方式2: 从 .replydate 的文本内容提取（相对时间）
+            if not last_reply_date:
+                alt_date = row.xpath('.//a[contains(@class, "replydate")]/text()').get()
+                if alt_date and alt_date not in ['刚才', '今天', '昨天', '前天']:
+                    last_reply_date = alt_date
+
+            # 方式3: 查找所有有title属性的元素，筛选出时间格式的
+            if not last_reply_date:
+                time_candidates = row.xpath('.//*[@title and string-length(@title) > 8]/@title').getall()
+                for candidate in time_candidates:
+                    if self._is_nga_time_format(candidate):
+                        last_reply_date = candidate
+                        break
+
+            # 方式4: 使用正则从整行文本中提取时间
+            if not last_reply_date:
+                row_text = row.xpath('string(.)').get()
+                last_reply_date = self._extract_time_from_text(row_text)
+
             # 获取数据库中该主题的最后回复时间
             db_last_reply = self.get_last_reply_from_db(tid)
             self.topic_last_reply_cache[tid] = db_last_reply  # 存入缓存
-            
+
             # 只有当网页时间比数据库时间新时才处理
-            if db_last_reply and not self.is_newer(last_reply_date, db_last_reply):
+            # 注意：如果网页时间为None（解析失败），默认当作新主题处理
+            if db_last_reply and last_reply_date and not self.is_newer(last_reply_date, db_last_reply):
+                # 网页时间和数据库时间都存在，但网页不新于数据库
                 self.logger.info(f"主题 {tid} 没有新回复 (数据库:{db_last_reply} >= 网页:{last_reply_date})")
                 continue
+
+            # 如果网页时间为None（新主题或无回复主题）或时间比数据库新，继续处理
+            if not last_reply_date:
+                if db_last_reply:
+                    # 主题没有网页时间，但数据库中有记录（可能是被限制或特殊主题）
+                    self.logger.debug(f"⚠️  主题 {tid} 无法获取网页时间，数据库已有记录 (数据库:{db_last_reply})")
+                else:
+                    # 新主题，没有最后回复时间
+                    self.logger.debug(f"✅ 主题 {tid} 没有最后回复时间，当作新主题处理")
+            elif db_last_reply:
+                # 既有网页时间也有数据库时间
+                self.logger.debug(f"✅ 主题 {tid} 网页时间比数据库时间新 (网页:{last_reply_date} > 数据库:{db_last_reply})")
                 
             partition = '水区'
             partition_el = row.xpath('.//td[@class="c2"]/span[@class="titleadd2"]/a[@class="silver"]/text()')
@@ -402,6 +440,39 @@ class NgaSpider(scrapy.Spider):
         self.logger.warning(f"无法解析的时间格式: {time_str}")
         return datetime.min
 
+
+    def _is_nga_time_format(self, time_str):
+        """检查字符串是否为NGA时间格式"""
+        if not time_str:
+            return False
+        import re
+        # 匹配 NGA 时间格式: 25-11-30 15:59, 2025-11-30 15:59:30 等
+        patterns = [
+            r'\d{2,4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?',  # 标准格式
+            r'\d{2,4}-\d{2}-\d{2}\s+\d{2}:\d{2}',             # 简化格式
+        ]
+        for pattern in patterns:
+            if re.match(pattern, time_str.strip()):
+                return True
+        return False
+
+    def _extract_time_from_text(self, text):
+        """从文本中使用正则表达式提取时间"""
+        if not text:
+            return None
+        import re
+        # 多种时间格式的正则表达式
+        patterns = [
+            r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',  # 2025-11-30 15:59:30
+            r'(\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',  # 25-11-30 15:59:30
+            r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',        # 2025-11-30 15:59
+            r'(\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2})',        # 25-11-30 15:59
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return None
 
     def _now_time(self):
         return time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())

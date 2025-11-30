@@ -1,0 +1,10 @@
+{
+  "trade_no": "your_trade_no_here",
+  "api_key": "your_api_key_here",
+  "api_url": "http://v2.api.juliangip.com/dynamic/getips",
+  "num": 2,
+  "pt": 1,
+  "result_type": "json",
+  "min_proxies": 2,
+  "get_interval": 60
+}

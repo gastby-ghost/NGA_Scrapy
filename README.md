@@ -1,538 +1,282 @@
 # NGA_Scrapy
 
-一个专门用于爬取NGA论坛数据的Scrapy爬虫项目，主要功能是自动获取NGA论坛水区的主题帖、回复内容和用户信息，并将数据存储到数据库中。
+一个基于Scrapy的NGA论坛（bbs.nga.cn）水区爬虫，支持增量爬取、浏览器自动化和定时执行。
 
-## 项目简介和功能概述
+## 功能特性
 
-NGA_Scrapy是一个功能完善的网络爬虫项目，专门针对NGA论坛（bbs.nga.cn）设计。项目采用增量爬取策略，只获取新内容，避免重复爬取，大大提高了爬取效率。
+- **增量爬取**: 通过时间戳比较仅获取新内容
+- **JavaScript渲染**: 使用Playwright处理动态内容
+- **浏览器池**: 复用浏览器实例提高效率
+- **图片下载**: 自动下载并存储图片
+- **定时执行**: APScheduler可配置间隔执行
+- **邮件通知**: 自动发送统计报告和错误告警
+- **代理支持**: 内置代理轮换功能（详见 代理使用指南.md）
 
-### 主要功能
+## 快速开始
 
-- **主题爬取**：爬取NGA论坛水区(fid=-7)前10页的主题列表
-- **回复爬取**：对每个主题爬取其所有回复内容
-- **用户信息爬取**：获取发帖用户的基本信息
-- **增量爬取**：通过比较数据库中的最后回复时间，只爬取新内容
-- **图片下载**：自动下载回复中的图片并保存到本地
-- **Cookie管理**：支持登录状态下的数据爬取
-- **定时调度**：支持定时自动执行爬取任务
-- **邮件通知**：自动发送统计报告和错误告警邮件
-- **数据统计**：自动收集并保存爬虫运行统计数据
-
-## 技术栈和依赖
-
-- **Scrapy**：核心爬虫框架
-- **SQLAlchemy**：ORM数据库操作框架
-- **Playwright**：浏览器自动化工具，用于处理JavaScript渲染的页面
-- **SQLite**：默认数据库（可配置其他数据库）
-- **APScheduler**：定时任务调度器
-- **Selenium**：用于获取Cookie的浏览器自动化工具
-- **PyYAML**：YAML配置文件解析
-- **smtplib**：邮件发送功能（Python标准库）
-
-### 依赖安装
-
-```bash
-pip install scrapy sqlalchemy playwright apscheduler selenium psutil pyyaml pytz
-playwright install chromium
-```
-
-## 项目结构说明
-
-```
-NGA_Scrapy/
-├── README.md                    # 项目说明文档
-├── CLAUDE.md                    # Claude Code 指导文档
-├── scrapy.cfg                   # Scrapy项目配置文件
-├── get_cookies.py               # Cookie获取工具
-├── init_db.py                   # 数据库初始化脚本
-├── NGA_Scrapy/                  # 爬虫核心目录
-│   ├── __init__.py
-│   ├── items.py                 # 数据项定义
-│   ├── middlewares.py           # 中间件（包含Playwright集成）
-│   ├── models.py                # 数据库模型定义
-│   ├── pipelines.py             # 数据处理管道
-│   ├── settings.py              # 爬虫配置
-│   ├── spiders/                 # 爬虫目录
-│   │   ├── __init__.py
-│   │   └── nga_spider.py        # NGA爬虫主程序
-│   └── utils/                   # 工具模块
-│       └── db_utils.py          # 数据库工具
-└── scheduler/                   # 定时调度器
-    ├── requirements.txt         # 调度器依赖
-    ├── run_scheduler.py         # 调度器主程序
-    ├── email_notifier.py        # 邮件通知模块
-    ├── email_config.yaml        # 邮件配置文件
-    ├── scheduler.log            # 调度器日志（运行时生成）
-    └── stats/                   # 统计数据目录（运行时生成）
-        └── spider_stats_*.json  # 爬虫统计文件
-```
-
-## 虚拟环境设置
-
-### 创建虚拟环境
-
-为了避免依赖冲突，建议在虚拟环境中运行此项目。以下是创建和激活虚拟环境的步骤：
-
-#### Windows系统
-
-```bash
-# 创建虚拟环境
-python -m venv venv
-
-# 激活虚拟环境
-venv\Scripts\activate
-
-# 退出虚拟环境（使用完毕后）
-deactivate
-```
-
-#### Linux/Mac系统
+### 1. 环境准备
 
 ```bash
 # 创建虚拟环境
 python3 -m venv venv
+source venv/bin/activate  # Linux/Mac
+# venv\Scripts\activate  # Windows
 
-# 激活虚拟环境
-source venv/bin/activate
-
-# 退出虚拟环境（使用完毕后）
-deactivate
-```
-
-### 虚拟环境使用建议
-
-1. **项目隔离**：每个项目使用独立的虚拟环境，避免依赖冲突
-2. **版本控制**：将`venv`目录添加到`.gitignore`文件中，不提交虚拟环境
-3. **依赖管理**：使用`pip freeze > requirements.txt`导出当前环境的依赖包列表
-4. **环境复制**：其他开发者可以通过`pip install -r requirements.txt`快速复现环境
-
-## 安装和配置指南
-
-### 1. 克隆项目
-
-```bash
-git clone <项目地址>
-cd NGA_Scrapy
-```
-
-### 2. 创建并激活虚拟环境
-
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Linux/Mac
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 3. 安装依赖
-
-```bash
+# 安装依赖
 pip install -r requirements.txt
-# 或者手动安装主要依赖
-pip install scrapy sqlalchemy playwright apscheduler selenium psutil
 playwright install chromium
 ```
 
-### 3. 初始化数据库
+### 2. 初始化数据库
 
 ```bash
 python init_db.py
 ```
 
-### 4. 获取Cookie（可选）
-
-如果需要爬取需要登录才能访问的内容：
+### 3. 运行爬虫
 
 ```bash
-python get_cookies.py
-```
-
-此命令会打开Chrome浏览器，请在40秒内手动完成NGA论坛登录，程序会自动保存Cookie到`cookies.txt`文件。
-
-## 使用方法和运行步骤
-
-### 1. 基本爬取
-
-```bash
+# 基础爬取
 scrapy crawl nga
+
+# 使用自定义数据库
+scrapy crawl nga -a db_url="sqlite:///custom.db"
+
+# 使用MySQL数据库
+scrapy crawl nga -a db_url="mysql://user:pass@localhost/nga_db"
 ```
 
-### 2. 指定数据库URL
-
-```bash
-scrapy crawl nga -a db_url="sqlite:///custom_nga.db"
-```
-
-### 3. 启动定时调度器
+### 4. 启动定时调度器（可选）
 
 ```bash
 cd scheduler
 python run_scheduler.py
 ```
 
-默认每30分钟执行一次爬取任务。
+默认每30分钟执行一次。
 
-#### 后台运行调度器
+### 5. 配置邮件通知（可选）
 
-由于调度器是持续运行的进程，关闭终端会导致进程停止。以下是几种让调度器在后台持续运行的方法：
-
-##### 方法1：nohup 后台运行（推荐用于临时测试）
-
-```bash
-cd scheduler
-nohup python run_scheduler.py > scheduler.log 2>&1 &
-```
-
-- 日志会输出到 `scheduler.log` 文件
-- 即使关闭终端也会继续运行
-- 停止方法：使用 `ps aux | grep run_scheduler` 找到进程ID，然后 `kill <PID>`
-
-##### 方法2：screen/tmux 会话（推荐用于开发环境）
-
-```bash
-# 安装screen（如果未安装）
-# Ubuntu/Debian: sudo apt-get install screen
-# CentOS/RHEL: sudo yum install screen
-
-# 创建命名会话
-screen -S ngascrape
-python run_scheduler.py
-# 按 Ctrl+A 然后按 D 退出会话，进程继续在后台运行
-
-# 查看所有会话
-screen -ls
-
-# 恢复会话
-screen -r ngascrape
-
-# 结束会话（恢复后使用）
-exit
-```
-
-##### 方法3：systemd 服务（推荐用于生产环境）
-
-创建 `/etc/systemd/system/nga-scraper.service` 文件：
-
-```ini
-[Unit]
-Description=NGA Scraper Service
-After=network.target
-
-[Service]
-Type=simple
-User=your_username
-WorkingDirectory=/home/shan/NGA_Scrapy/scheduler
-ExecStart=/home/shan/NGA_Scrapy/venv/bin/python run_scheduler.py
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启动并设置开机自启：
-
-```bash
-# 重新加载systemd配置
-sudo systemctl daemon-reload
-
-# 启用服务（开机自启）
-sudo systemctl enable nga-scraper
-
-# 启动服务
-sudo systemctl start nga-scraper
-
-# 查看服务状态
-sudo systemctl status nga-scraper
-
-# 查看日志
-sudo journalctl -u nga-scraper -f
-
-# 停止服务
-sudo systemctl stop nga-scraper
-```
-
-**systemd 的优势：**
-- 系统重启后自动启动
-- 进程崩溃时自动重启
-- 统一的日志管理
-- 更容易管理服务生命周期
-
-##### 方法4：使用supervisor（生产环境的另一个选择）
-
-安装 supervisor：
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install supervisor
-
-# CentOS/RHEL
-sudo yum install supervisor
-```
-
-创建配置文件 `/etc/supervisor/conf.d/nga-scraper.conf`：
-
-```ini
-[program:nga-scraper]
-command=/home/shan/NGA_Scrapy/venv/bin/python run_scheduler.py
-directory=/home/shan/NGA_Scrapy/scheduler
-user=your_username
-autostart=true
-autorestart=true
-stderr_logfile=/var/log/nga-scraper.err.log
-stdout_logfile=/var/log/nga-scraper.out.log
-```
-
-启动服务：
-
-```bash
-# 重新加载配置
-sudo supervisorctl reread
-sudo supervisorctl update
-
-# 管理服务
-sudo supervisorctl start nga-scraper
-sudo supervisorctl stop nga-scraper
-sudo supervisorctl status nga-scraper
-```
-
-
-### 邮件通知功能说明
-
-爬虫调度器支持自动发送邮件通知，包括定期统计报告和实时错误告警。
-
-#### 配置邮件通知
-
-编辑 `scheduler/email_config.yaml` 文件，配置SMTP服务器和通知选项：
+编辑 `scheduler/email_config.yaml`:
 
 ```yaml
-# SMTP服务器配置（以QQ邮箱为例）
 smtp_server: "smtp.qq.com"
 smtp_port: 587
 username: "your_email@qq.com"
-password: "your_app_password"  # QQ邮箱授权码，非QQ密码
+password: "your_app_password"  # 使用应用密码，不是QQ密码
 from_email: "your_email@qq.com"
 to_emails:
   - "recipient@example.com"
 use_tls: true
 
-# 通知设置
 notifications:
   enable_statistics_report: true
   statistics_report_interval_days: 3
-  statistics_report_time: "09:00"
   enable_error_alerts: true
   consecutive_failures_threshold: 3
-  spider_timeout_minutes: 60
-  error_rate_alert:
-    enabled: true
-    threshold_percent: 10
-    time_window_minutes: 30
 ```
 
-**获取QQ邮箱授权码：**
-1. 登录QQ邮箱，进入设置→账户
-2. 找到"POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV服务"
-3. 开启"IMAP/SMTP服务"或"POP3/SMTP服务"
-4. 按提示发送短信获取授权码
-5. 将授权码填入`password`字段
+## 项目结构
 
-#### 1. 统计报告
-- **发送时机**：
-  - 首次统计报告：第一次爬虫成功执行后立即发送
-  - 定期报告：每3天09:00发送（可配置）
-- **报告内容**：
-  - **爬取统计**：抓取项目总数、爬取页面总数、去重过滤数
-  - **运行统计**：总执行次数、成功/失败次数、总运行时间、平均执行时间
-  - **资源消耗**：下载数据总量、平均下载速度
-  - **执行状态**：执行成功率、最近执行状态
-- **邮件格式**：支持HTML和纯文本两种格式，HTML版本带样式美化
-
-#### 2. 错误告警
-- **连续失败告警**：爬虫连续失败3次（可配置）时发送
-- **超时告警**：爬虫运行超过60分钟（可配置）时发送
-- **错误率告警**：平均错误率超过10%（可配置）时发送
-- **告警内容**：告警类型、发生时间、详细错误信息
-- **实时性**：错误发生后立即发送，便于及时处理
-
-#### 3. 统计数据存储
-
-爬虫每次运行的统计数据会自动保存到 `scheduler/stats/` 目录：
-- 文件格式：`spider_stats_YYYYMMDD_HHMMSS.json`
-- 包含内容：执行时间、返回码、成功状态、详细统计数据
-- 用途：用于生成统计报告和历史数据分析
-
-### 启动调度器
-
-```bash
-cd scheduler
-python run_scheduler.py
+```
+NGA_Scrapy/
+├── NGA_Scrapy/              # 核心Scrapy项目
+│   ├── spiders/nga_spider.py    # 主爬虫
+│   ├── items.py                 # 数据项定义
+│   ├── models.py                # SQLAlchemy模型
+│   ├── pipelines.py             # 数据处理管道
+│   ├── middlewares.py           # Playwright中间件
+│   ├── settings.py              # 爬虫配置
+│   └── utils/                   # 工具模块
+├── scheduler/                # 调度器和邮件
+│   ├── run_scheduler.py         # 调度器守护进程
+│   ├── email_notifier.py        # 邮件通知模块
+│   └── email_config.yaml        # 邮件配置
+├── init_db.py                # 数据库初始化
+├── get_cookies.py            # Cookie获取工具
+└── requirements.txt          # 依赖列表
 ```
 
-启动后会显示邮件通知是否启用：
-```
-============================================================
-NGA 爬虫调度器启动
-============================================================
-配置信息:
-  - 时区: Asia/Shanghai
-  - 执行间隔: 30 分钟
-  - 启动时间: 2025-11-29 10:00:00
-  - 日志文件: scheduler.log
-  - 邮件通知: 已启用
-  - 统计报告: 启用
-  - 首次统计报告: 将在第一次爬虫成功后发送
-  - 错误告警: 启用
-============================================================
-按 Ctrl+C 优雅退出
-============================================================
-```
+## 核心组件
 
-### 查看邮件发送日志
+### 爬虫 (nga_spider.py)
+- 爬取NGA水区 (fid=-7)
+- 实现增量爬取策略
+- 解析主题、回复和用户信息
+- 提取图片URL
 
-所有邮件发送记录都会写入 `scheduler.log` 文件：
+### 中间件 (middlewares.py)
+- **PlaywrightMiddleware**: 管理浏览器池
+- 支持代理轮换
+- 处理JavaScript渲染
+- 性能监控
 
-```bash
-tail -f scheduler.log | grep -i mail
-```
+### 数据库 (models.py)
+- **User**: uid, name, user_group, prestige, reg_date
+- **Topic**: tid, title, poster_id, post_time, re_num, last_reply_date
+- **Reply**: rid, tid, content, poster_id, post_time, image_urls, image_paths
+
+### 调度器 (scheduler/run_scheduler.py)
+- APScheduler后台执行
+- 实时日志监控
+- 统计数据收集
+- 优雅关闭 (SIGINT/SIGTERM)
 
 ## 配置说明
 
-### 主要配置项（NGA_Scrapy/settings.py）
-
-- `PLAYWRIGHT_POOL_SIZE`：浏览器实例池大小（默认6）
-- `DOWNLOAD_TIMEOUT`：全局超时时间（默认20秒）
-- `IMAGES_STORE`：图片存储路径（默认`/download_images`）
-- `LOG_LEVEL`：日志级别（默认INFO）
-- `LOG_FILE`：日志文件路径（默认`nga_spider.log`）
-
-### 数据库配置
-
-默认使用SQLite数据库，数据库文件为`nga.db`。如需使用其他数据库，可通过`db_url`参数指定，例如：
-
-```bash
-# MySQL
-scrapy crawl nga -a db_url="mysql://user:password@localhost/nga_db"
-
-# PostgreSQL
-scrapy crawl nga -a db_url="postgresql://user:password@localhost/nga_db"
+### 浏览器设置 (settings.py)
+```python
+PLAYWRIGHT_POOL_SIZE = 6          # 浏览器池大小
+DOWNLOAD_TIMEOUT = 20             # 请求超时时间(秒)
+CONCURRENT_REQUESTS = 16          # 并发请求数
+IMAGES_STORE = 'download_images'  # 图片存储路径
 ```
 
-## 项目特点和亮点
+### 邮件设置 (email_config.yaml)
+```yaml
+# 每3天09:00发送统计报告
+statistics_report_interval_days: 3
+statistics_report_time: "09:00"
 
-### 1. 增量爬取策略
-- 通过比较网页时间与数据库时间，只爬取新内容
-- 避免重复爬取，提高效率
-- 支持多种NGA时间格式解析
+# 错误告警
+consecutive_failures_threshold: 3  # 连续失败3次告警
+spider_timeout_minutes: 60         # 运行超过60分钟告警
+```
 
-### 2. 高性能设计
-- 主题列表页并行爬取（10页并发）
-- 回复分页自动处理
-- 数据库查询结果缓存
-- 浏览器实例池管理
+## 使用示例
 
-### 3. 完善的错误处理
-- 全面的异常捕获和处理
-- 详细的日志记录
-- 自动重试机制
+### 基础爬取
+```bash
+scrapy crawl nga
+```
 
-### 4. 资源管理
-- 自动管理数据库连接生命周期
-- 浏览器实例池复用
-- 内存和CPU使用监控
+### 自定义数据库
+```bash
+scrapy crawl nga -a db_url="sqlite:///nga_custom.db"
+```
 
-### 5. 数据完整性
-- 图片自动下载和本地存储
-- 用户信息关联
-- 主题和回复的完整关联
+### 调试模式运行
+```bash
+scrapy crawl nga -L DEBUG
+```
 
-### 6. 智能监控和通知
-- **邮件通知系统**：自动发送统计报告和错误告警
-- **多种告警类型**：连续失败告警、超时告警、错误率告警
-- **HTML邮件美化**：支持HTML和纯文本双格式邮件
-- **首次即时报告**：第一次爬虫成功后立即发送统计报告
-- **灵活配置**：通过YAML文件配置所有通知选项
+### 后台调度器
+```bash
+# 使用nohup
+cd scheduler
+nohup python run_scheduler.py > scheduler.log 2>&1 &
 
-### 7. 统计数据收集
-- **自动存储**：每次运行的统计数据自动保存为JSON文件
-- **数据聚合**：支持跨时间范围的数据聚合分析
-- **详细指标**：包含抓取数、响应时间、成功率等多维度指标
-- **历史追踪**：保留历史统计数据便于趋势分析
+# 使用screen
+screen -S ngascrape
+python run_scheduler.py
+# 按 Ctrl+A，然后按 D 脱离会话
+```
 
-## 使用场景
+## 邮件通知
 
-1. **论坛数据分析**：对NGA论坛水区的内容进行数据分析
-2. **舆情监控**：监控特定话题的讨论情况
-3. **内容备份**：备份有价值的论坛内容
-4. **用户行为研究**：研究用户发帖和回复行为
-5. **趋势分析**：分析热门话题和讨论趋势
+### 统计报告
+- **首次报告**: 第一次成功爬取后立即发送
+- **定期报告**: 每3天09:00发送（可配置）
+- **报告内容**: 爬取统计、成功率、资源使用情况
 
-## 贡献指南
+### 错误告警
+- **连续失败**: 连续失败3次以上（可配置）
+- **超时告警**: 爬虫运行超过60分钟（可配置）
+- **高错误率**: 30分钟窗口内错误率超过10%
 
-欢迎提交Issue和Pull Request来改进项目。
+### QQ邮箱设置
+1. 登录QQ邮箱 → 设置 → 账户
+2. 开启"IMAP/SMTP服务"或"POP3/SMTP服务"
+3. 发送短信获取应用专用密码
+4. 在配置中使用应用密码（非QQ密码）
 
-### 开发环境设置
+## 故障排除
 
-1. Fork本项目
-2. 创建特性分支：`git checkout -b feature/AmazingFeature`
-3. 提交更改：`git commit -m 'Add some AmazingFeature'`
-4. 推送到分支：`git push origin feature/AmazingFeature`
-5. 提交Pull Request
+### 常见问题
+
+**Q: 浏览器启动失败**
+A: 运行 `playwright install chromium` 安装浏览器
+
+**Q: Cookie问题**
+A: 运行 `python get_cookies.py` 并在40秒内完成登录
+
+**Q: 调度器无法发送邮件**
+A: 检查 `scheduler/scheduler.log` 中的错误；确保QQ邮箱使用应用密码
+
+**Q: 数据库被锁定**
+A: 关闭所有数据库连接并重启爬虫
+
+### 日志查看
+```bash
+# 爬虫日志
+tail -f nga_spider.log
+
+# 调度器日志
+tail -f scheduler/scheduler.log
+
+# 邮件日志
+tail -f scheduler/scheduler.log | grep -i mail
+```
+
+### 统计数据
+```bash
+# 查看最新运行统计
+cat scheduler/stats/spider_stats_*.json | jq . | head -50
+```
+
+## 数据库架构
+
+### user表
+- uid (主键), name, user_group, prestige, reg_date, history_re_num
+
+### topic表
+- tid (主键), title, poster_id (外键→user.uid), post_time, re_num, sampling_time, last_reply_date, partition
+
+### reply表
+- rid (主键), tid (外键→topic.tid), parent_rid (外键→reply.rid), content, recommendvalue, poster_id (外键→user.uid), post_time, image_urls (JSON), image_paths (JSON), sampling_time
+
+## 开发指南
+
+### 关键修改文件
+
+- **nga_spider.py**: 爬取逻辑、页面解析、时间比较
+- **middlewares.py**: 浏览器管理、代理设置
+- **settings.py**: 并发、超时、日志配置
+- **email_config.yaml**: SMTP和通知设置
+
+### 测试
+```bash
+# 测试代理配置
+python test_proxy_config.py
+
+# 调试XPath解析
+python debug_xpath.py
+```
 
 ## 许可证
 
-本项目采用MIT许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+MIT许可证
 
-## 常见问题
+## 贡献指南
 
-### Q: 爬虫运行很慢怎么办？
-A: 可以调整`PLAYWRIGHT_POOL_SIZE`和`CONCURRENT_REQUESTS`参数来提高并发数，但请注意不要设置过高以免对目标网站造成压力。
-
-### Q: 如何修改爬取的页面数量？
-A: 修改`NGA_Scrapy/spiders/nga_spider.py`文件中的`pageNum`变量。
-
-### Q: 如何添加其他分区的爬取？
-A: 修改`start_urls`和`parse`方法中的URL参数，将`fid=-7`改为目标分区的fid。
-
-### Q: 数据库文件过大怎么办？
-A: 可以定期清理旧数据，或者使用其他数据库系统如MySQL、PostgreSQL等。
-
-### Q: 如何配置邮件通知？
-A: 编辑`scheduler/email_config.yaml`文件，配置SMTP服务器信息和通知选项。对于QQ邮箱，需要使用授权码而非QQ密码。详见"邮件通知功能说明"章节。
-
-### Q: 邮件通知不工作怎么办？
-A: 1) 检查`email_config.yaml`配置是否正确；2) 确认SMTP服务器地址和端口正确；3) 对于QQ邮箱，确保使用的是授权码；4) 查看`scheduler/scheduler.log`日志文件中的错误信息。
-
-### Q: 统计数据保存在哪里？
-A: 统计数据保存在`scheduler/stats/`目录下，以JSON格式存储，文件名包含时间戳。每次爬虫运行都会生成一个新的统计文件。
+1. Fork本项目
+2. 创建特性分支
+3. 提交Pull Request
 
 ## 更新日志
 
 ### v1.2.0 (2025-11)
-- ✨ 新增邮件通知系统（统计报告和错误告警）
-- ✨ 新增爬虫运行统计数据自动收集和保存功能
-- ✨ 新增首次成功后立即发送统计报告
-- 🔧 优化调度器，支持优雅关闭
-- 🔧 增强日志系统，实时输出爬虫运行日志
-- 📝 完善配置文件（YAML格式）
+- 新增邮件通知系统
+- 新增统计数据收集
+- 增强调度器优雅关闭
+- 改进日志系统
 
 ### v1.1.0
-- 🔧 优化浏览器池管理
-- 🔧 改进错误处理机制
-- 📝 完善文档
+- 优化浏览器池管理
+- 改进错误处理
 
 ### v1.0.0
-- 🎉 初始版本发布
-- ✨ 实现基本爬取功能
-- ✨ 支持增量爬取
-- ✨ 添加图片下载功能
-- ✨ 实现定时调度
-
----
-
-如有问题或建议，请提交Issue或联系项目维护者。
+- 初始版本发布
+- 基础爬取功能
+- 增量爬取支持
+- 图片下载功能

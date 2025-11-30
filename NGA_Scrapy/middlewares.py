@@ -18,6 +18,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, Future
 import uuid
 from scrapy import signals
+from NGA_Scrapy.utils.proxy_manager import get_proxy_manager
 
 class PerformanceStats:
     """性能统计工具类"""
@@ -73,10 +74,11 @@ class PerformanceStats:
 
 class BrowserPool:
     """Playwright浏览器连接池（带性能监控）- 线程安全版本"""
-    def __init__(self, max_browsers: int = 4, spider_logger=None):
+    def __init__(self, max_browsers: int = 4, spider_logger=None, proxy_manager=None):
         self.max_browsers = max_browsers
         self.logger = spider_logger
         self.stats = PerformanceStats()
+        self.proxy_manager = proxy_manager
         self._request_queue = Queue()
         self._result_map = {}
         self._lock = threading.Lock()
@@ -125,12 +127,14 @@ class BrowserPool:
                         '--disable-notifications',
                     ]
                 )
-                context = browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    java_script_enabled=True,
-                    ignore_https_errors=True,
-                    permissions=[],
-                    extra_http_headers={
+
+                # 构建context参数
+                context_kwargs = {
+                    'viewport': {'width': 1920, 'height': 1080},
+                    'java_script_enabled': True,
+                    'ignore_https_errors': True,
+                    'permissions': [],
+                    'extra_http_headers': {
                         'User-Agent': 'Mozilla/5.0 (Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
@@ -146,7 +150,36 @@ class BrowserPool:
                         'Sec-Ch-Ua-Platform': '"Linux"',
                         'Upgrade-Insecure-Requests': '1'
                     }
-                )
+                }
+
+                # 如果启用了代理，设置代理
+                if self.proxy_manager:
+                    self.logger.debug(f"🔍 获取随机代理 (池中有 {len(self.proxy_manager.proxy_pool)} 个代理)")
+                    proxy_dict = self.proxy_manager.get_random_proxy()
+                    if proxy_dict and proxy_dict.get('proxy'):
+                        # 构建代理服务器地址
+                        proxy_server = proxy_dict['proxy']
+                        auth_info = ""
+                        if 'username' in proxy_dict and 'password' in proxy_dict:
+                            auth_info = f" (认证: {proxy_dict['username']})"
+
+                        # 构建代理设置
+                        proxy_config = {
+                            'server': proxy_server,
+                            'bypass': 'localhost;127.0.0.1;*.nga.cn;*.ngabbs.com'
+                        }
+
+                        # 如果有认证信息，添加认证
+                        if 'username' in proxy_dict and 'password' in proxy_dict:
+                            proxy_config['username'] = proxy_dict['username']
+                            proxy_config['password'] = proxy_dict['password']
+
+                        context_kwargs['proxy'] = proxy_config
+                        self.logger.info(f"🌐 使用代理: {proxy_server}{auth_info}")
+                    else:
+                        self.logger.warning("⚠️ 未获取到可用代理，使用直连")
+
+                context = browser.new_context(**context_kwargs)
                 browser_pool.append((browser, context))
 
             self.logger.info(f"浏览器池初始化完成，共{len(browser_pool)}个实例")
@@ -327,6 +360,7 @@ class PlaywrightMiddleware:
         self.browser_pool = None
         self.logger = None
         self.cookies = None
+        self.proxy_manager = None
         self.last_stat_time = time.time()
         self._browser_index = 0  # 用于轮询选择浏览器实例
 
@@ -343,7 +377,63 @@ class PlaywrightMiddleware:
     def spider_opened(self, spider):
         """Spider启动时的处理"""
         self.logger = spider.logger
-        self.logger.info("Playwright中间件已启动，信号处理器已注册")
+        self.logger.info("=" * 60)
+        self.logger.info("🚀 Playwright中间件已启动，信号处理器已注册")
+        self.logger.info("=" * 60)
+
+        # 检查是否启用代理
+        proxy_enabled = spider.settings.getbool('PROXY_ENABLED', False)
+        self.logger.info(f"🔍 检查代理设置: PROXY_ENABLED = {proxy_enabled}")
+
+        if proxy_enabled:
+            try:
+                self.logger.info("🔧 正在初始化代理管理器...")
+                self.proxy_manager = get_proxy_manager()
+                self.logger.info("✅ 代理管理器已初始化")
+
+                # 获取初始代理列表
+                self.logger.info("🔄 正在获取初始代理列表...")
+                proxies = self.proxy_manager.get_proxies(force_refresh=True)
+
+                if proxies:
+                    self.logger.info(f"✅ 成功加载 {len(proxies)} 个代理")
+                    self.logger.info(f"📋 代理列表: {', '.join(proxies[:5])}")
+                    if len(proxies) > 5:
+                        self.logger.info(f"   ... 等共 {len(proxies)} 个代理")
+                else:
+                    self.logger.warning("⚠️ 未获取到任何代理")
+
+                # 显示代理池状态
+                status = self.proxy_manager.get_pool_status()
+                self.logger.info("📊 代理池初始状态:")
+                for key, value in status.items():
+                    self.logger.info(f"   - {key}: {value}")
+
+                self.logger.info("=" * 60)
+
+            except FileNotFoundError as e:
+                self.logger.error("=" * 60)
+                self.logger.error(f"❌ 代理配置文件错误: {e}")
+                self.logger.error("请确保 proxy_config.json 文件存在且配置正确")
+                self.logger.error("=" * 60)
+                self.proxy_manager = None
+
+            except ValueError as e:
+                self.logger.error("=" * 60)
+                self.logger.error(f"❌ 代理配置验证错误: {e}")
+                self.logger.error("请检查配置文件中的 trade_no 和 api_key 是否正确")
+                self.logger.error("=" * 60)
+                self.proxy_manager = None
+
+            except Exception as e:
+                self.logger.error("=" * 60)
+                self.logger.error(f"❌ 代理管理器初始化失败: {str(e)}")
+                self.logger.error(f"错误类型: {type(e).__name__}")
+                self.logger.error("=" * 60)
+                self.proxy_manager = None
+        else:
+            self.logger.info("ℹ️  代理未启用 (PROXY_ENABLED = False)")
+            self.logger.info("=" * 60)
 
     def spider_closed(self, spider, reason):
         """Spider关闭时的处理"""
@@ -423,6 +513,57 @@ class PlaywrightMiddleware:
         except Exception as e:
             self.logger.info(f"加载cookies时发生未知错误: {e}")
 
+    def _save_cookies_if_updated(self, context):
+        """
+        检查并保存更新后的cookies
+        这个方法会在每次成功访问页面后被调用，自动更新ngaPassportUid等cookies
+        """
+        try:
+            # 从当前context获取所有cookies
+            current_cookies = context.cookies()
+
+            # 查找ngaPassportUid（短效cookie）
+            nga_passport = next(
+                (c for c in current_cookies if c['name'] == 'ngaPassportUid'),
+                None
+            )
+
+            if nga_passport:
+                # 查找旧的ngaPassportUid
+                old_nga_passport = next(
+                    (c for c in self.cookies if c['name'] == 'ngaPassportUid'),
+                    None
+                )
+
+                # 如果旧的不存在，或值/过期时间不同，则需要更新
+                needs_update = (
+                    not old_nga_passport or
+                    old_nga_passport['value'] != nga_passport['value'] or
+                    old_nga_passport.get('expires', 0) != nga_passport.get('expires', 0)
+                )
+
+                if needs_update:
+                    # 保存所有cookies到文件
+                    with open('cookies.txt', 'w', encoding='utf-8') as f:
+                        json.dump(current_cookies, f, ensure_ascii=False, indent=2)
+
+                    # 更新内存中的cookies缓存
+                    self.cookies = current_cookies
+
+                    # 记录日志
+                    expires_time = time.strftime(
+                        '%Y-%m-%d %H:%M:%S',
+                        time.localtime(nga_passport['expires'])
+                    )
+                    self.logger.info(
+                        f"✓ 已自动更新 ngaPassportUid - "
+                        f"新值: {nga_passport['value'][:20]}..., "
+                        f"过期时间: {expires_time}"
+                    )
+
+        except Exception as e:
+            self.logger.error(f"自动更新cookies失败: {e}")
+
     def process_request(self, request, spider):
         if not self.logger:
             self.logger = spider.logger
@@ -433,7 +574,8 @@ class PlaywrightMiddleware:
         if not self.browser_pool:
             self.browser_pool = BrowserPool(
                 max_browsers=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
-                spider_logger=spider.logger
+                spider_logger=spider.logger,
+                proxy_manager=self.proxy_manager
             )
 
         # 每小时输出一次统计报告
@@ -482,6 +624,9 @@ class PlaywrightMiddleware:
                         f"弹窗处理: {alert_time:.2f}s, "
                         f"等待完成: {load_time:.2f}s"
                     )
+
+                    # 【关键改进】在返回前自动更新cookies
+                    self._save_cookies_if_updated(context)
 
                     return {
                         'url': page.url,
