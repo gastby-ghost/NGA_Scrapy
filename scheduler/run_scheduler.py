@@ -136,8 +136,9 @@ def run_spider():
         logger.info("=" * 60)
 
         # 使用Popen代替run()，避免阻塞
+        # 使用settings_cloud配置（云服务器优化参数）
         spider_process = subprocess.Popen(
-            ["scrapy", "crawl", "nga"],
+            ["scrapy", "crawl", "nga", "-s", "SETTINGS_MODULE=settings_cloud"],
             cwd=PROJECT_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -451,6 +452,15 @@ if __name__ == '__main__':
     if os.path.exists(log_file):
         open(log_file, 'w', encoding='utf-8').close()
         print(f"已清空日志文件: {log_file}")
+
+    # 检测是否在screen中运行
+    in_screen = os.environ.get('STY') is not None
+    if in_screen:
+        print("\n" + "=" * 60)
+        print("📺 检测到在Screen会话中运行")
+        print("   会话名称:", os.environ.get('STY', '未知'))
+        print("   提示: 按 Ctrl+\\ 可优雅退出")
+        print("=" * 60 + "\n")
 
     # 注册信号处理器
     signal.signal(signal.SIGINT, signal_handler)
