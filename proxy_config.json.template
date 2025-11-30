@@ -6,5 +6,7 @@
   "pt": 1,
   "result_type": "json",
   "min_proxies": 2,
-  "get_interval": 60
+  "get_interval": 60,
+  "max_retries": 3,
+  "retry_interval": 2
 }

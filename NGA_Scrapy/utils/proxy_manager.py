@@ -48,6 +48,9 @@ class ProxyManager:
         # 在云服务器上设置更高的最小阈值，避免频繁获取
         self.min_proxies = config.get('min_proxies', 10)
         self.get_interval = config.get('get_interval', 60)
+        # 重试配置
+        self.max_retries = config.get('max_retries', 3)
+        self.retry_interval = config.get('retry_interval', 2)
         # 可选参数
         self.auto_white = config.get('auto_white')
         self.split = config.get('split')
@@ -159,58 +162,97 @@ class ProxyManager:
         if hasattr(self, 'split'):
             params['split'] = self.split
 
-        try:
-            self.logger.info(f"正在调用代理API: {self.api_url}")
-            self.logger.debug(f"请求参数: {params}")
+        # 尝试多次获取代理
+        for attempt in range(self.max_retries):
+            try:
+                if attempt > 0:
+                    self.logger.info(f"🔄 第 {attempt + 1} 次重试获取代理...")
+                    time.sleep(self.retry_interval)
 
-            response = requests.get(
-                self.api_url,
-                params=params,
-                timeout=10
-            )
+                self.logger.info(f"正在调用代理API: {self.api_url}")
+                self.logger.debug(f"请求参数: {params}")
 
-            self.logger.debug(f"API响应状态码: {response.status_code}")
-            self.logger.debug(f"API响应内容: {response.text[:500]}")
+                response = requests.get(
+                    self.api_url,
+                    params=params,
+                    timeout=10
+                )
 
-            response.raise_for_status()
+                self.logger.debug(f"API响应状态码: {response.status_code}")
+                self.logger.debug(f"API响应内容: {response.text[:500]}")
 
-            # 处理不同响应格式
-            if self.result_type == 'text':
-                # 纯文本格式，每行一个代理
-                proxy_list = []
-                for line in response.text.strip().split('\n'):
-                    line = line.strip()
-                    if line:
-                        proxy_list.append(line)
-                self.logger.info(f"API返回文本格式: 代理列表={len(proxy_list)}")
-                return proxy_list
-            else:
-                # JSON格式
-                data = response.json()
+                response.raise_for_status()
 
-                if data.get('code') != 200:
-                    error_msg = data.get('msg', '未知错误')
-                    self.logger.error(f"API返回错误: {error_msg}")
+                # 处理不同响应格式
+                if self.result_type == 'text':
+                    # 纯文本格式，每行一个代理
+                    proxy_list = []
+                    for line in response.text.strip().split('\n'):
+                        line = line.strip()
+                        if line:
+                            proxy_list.append(line)
+                    self.logger.info(f"API返回文本格式: 代理列表={len(proxy_list)}")
+
+                    # 检查是否获取到有效代理
+                    if proxy_list:
+                        # 验证代理格式（必须包含IP:PORT）
+                        valid_proxies = []
+                        for proxy in proxy_list:
+                            if ':' in proxy:
+                                valid_proxies.append(proxy)
+                            else:
+                                self.logger.warning(f"代理格式不正确，已过滤: {proxy}")
+
+                        if valid_proxies:
+                            return valid_proxies
+                        elif attempt < self.max_retries - 1:
+                            self.logger.warning(f"未获取到有效代理，准备第 {attempt + 2} 次重试")
+                            continue
+                        else:
+                            self.logger.warning("已达到最大重试次数，返回空列表")
+                            return []
+                else:
+                    # JSON格式
+                    data = response.json()
+
+                    if data.get('code') != 200:
+                        error_msg = data.get('msg', '未知错误')
+                        self.logger.error(f"API返回错误: {error_msg}")
+
+                        # 如果是特定错误且还有重试次数，则重试
+                        if ('未检索到满足要求的代理IP' in error_msg or
+                            '调整筛选条件后再试' in error_msg) and attempt < self.max_retries - 1:
+                            self.logger.warning(f"检测到代理不足错误，准备第 {attempt + 2} 次重试")
+                            continue
+                        else:
+                            return None
+
+                    # 提取代理列表
+                    proxy_list = data.get('data', {}).get('proxy_list', [])
+                    count = data.get('data', {}).get('count', 0)
+                    surplus = data.get('data', {}).get('surplus_quantity', 0)
+
+                    self.logger.info(f"API返回: 总数={count}, 剩余={surplus}, 代理列表={len(proxy_list)}")
+
+                    return proxy_list
+
+            except requests.RequestException as e:
+                self.logger.error(f"API请求失败: {str(e)}")
+                if attempt == self.max_retries - 1:
                     return None
+                continue
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON解析失败: {str(e)}")
+                if attempt == self.max_retries - 1:
+                    return None
+                continue
+            except Exception as e:
+                self.logger.error(f"获取代理时发生未知错误: {str(e)}")
+                if attempt == self.max_retries - 1:
+                    return None
+                continue
 
-                # 提取代理列表
-                proxy_list = data.get('data', {}).get('proxy_list', [])
-                count = data.get('data', {}).get('count', 0)
-                surplus = data.get('data', {}).get('surplus_quantity', 0)
-
-                self.logger.info(f"API返回: 总数={count}, 剩余={surplus}, 代理列表={len(proxy_list)}")
-
-                return proxy_list
-
-        except requests.RequestException as e:
-            self.logger.error(f"API请求失败: {str(e)}")
-            return None
-        except json.JSONDecodeError as e:
-            self.logger.error(f"JSON解析失败: {str(e)}")
-            return None
-        except Exception as e:
-            self.logger.error(f"获取代理时发生未知错误: {str(e)}")
-            return None
+        return None
 
     def get_random_proxy(self) -> Optional[Dict]:
         """
