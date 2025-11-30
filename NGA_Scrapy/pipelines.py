@@ -126,6 +126,21 @@ class NgaPipeline:
     def __init__(self):
         self.session = None
 
+    def _clean_recommendvalue(self, value):
+        """清理recommendvalue字段，确保为有效整数"""
+        if value is None:
+            return 0
+        # 转换为字符串并去除空白字符
+        value_str = str(value).strip()
+        # 如果为空或不可见字符，返回0
+        if not value_str or value_str in ['\xa0', ' ', '']:
+            return 0
+        # 尝试转换为整数
+        try:
+            return int(value_str)
+        except (ValueError, TypeError):
+            return 0
+
     def open_spider(self, spider):
         self.session = create_db_session()
 
@@ -161,6 +176,22 @@ class NgaPipeline:
         self.session.merge(user)
 
     def _process_topic(self, item):
+        # 确保poster_id对应的用户存在，如果不存在则创建默认用户记录
+        poster_id = item.get('poster_id')
+        if poster_id:
+            existing_user = self.session.query(User).filter_by(uid=poster_id).first()
+            if not existing_user:
+                # 创建默认用户记录
+                default_user = User(
+                    uid=poster_id,
+                    name='',
+                    user_group='匿名用户',
+                    prestige='',
+                    reg_date='',
+                    history_re_num=''
+                )
+                self.session.merge(default_user)
+
         topic = Topic(
             tid=item['tid'],
             title=item['title'],
@@ -174,12 +205,31 @@ class NgaPipeline:
         self.session.merge(topic)
 
     def _process_reply(self, item):
+        # 确保poster_id对应的用户存在，如果不存在则创建默认用户记录
+        poster_id = item.get('poster_id')
+        if poster_id:
+            existing_user = self.session.query(User).filter_by(uid=poster_id).first()
+            if not existing_user:
+                # 创建默认用户记录
+                default_user = User(
+                    uid=poster_id,
+                    name='',
+                    user_group='匿名用户',
+                    prestige='',
+                    reg_date='',
+                    history_re_num=''
+                )
+                self.session.merge(default_user)
+
+        # 清理recommendvalue字段，确保为有效整数
+        recommendvalue = self._clean_recommendvalue(item.get('recommendvalue', '0'))
+
         reply = Reply(
             rid=item['rid'],
             tid=item['tid'],
             parent_rid=item.get('parent_rid'),
             content=item['content'],
-            recommendvalue=item.get('recommendvalue', '0'),
+            recommendvalue=recommendvalue,
             poster_id=item['poster_id'],
             post_time=item['post_time'],
             sampling_time=item['sampling_time'],

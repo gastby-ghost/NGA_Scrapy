@@ -25,6 +25,14 @@ source venv/bin/activate  # Linux/Mac
 
 # 安装依赖
 pip install -r requirements.txt
+
+# 安装Playwright浏览器依赖（云服务器必需）
+# Ubuntu/Debian系统需要额外安装系统依赖
+playwright install-deps chromium  # 自动安装系统依赖
+# 或
+# sudo apt-get install libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libxkbcommon0 libasound2
+
+# 安装Chromium浏览器
 playwright install chromium
 ```
 
@@ -323,7 +331,31 @@ sudo -u postgres psql -d nga_scrapy -c "SELECT current_database();"
 
 ### 爬虫相关
 
-**Q: 浏览器启动失败**
+**Q: 浏览器启动失败 - 提示 "Host system is missing dependencies"**
+
+A: 云服务器缺少Playwright系统依赖，需要安装：
+```bash
+# 方法1: 使用Playwright自动安装依赖（推荐）
+playwright install-deps
+
+# 方法2: 手动安装系统依赖
+sudo apt-get update
+sudo apt-get install -y libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libatspi2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libxkbcommon0 \
+    libasound2
+
+# 然后安装Chromium浏览器
+playwright install chromium
+```
+
+**Q: 浏览器启动失败（其他情况）**
 
 A: 运行 `playwright install chromium` 安装浏览器
 
