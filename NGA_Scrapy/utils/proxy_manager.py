@@ -41,10 +41,12 @@ class ProxyManager:
             raise ValueError("配置错误：api_key是必填参数，且不能为默认值'your_api_key_here'")
 
         self.api_url = config.get('api_url', 'http://v2.api.juliangip.com/dynamic/getips')
-        self.num = config.get('num', 10)
+        # 在云服务器上建议获取更多代理
+        self.num = config.get('num', 20)
         self.pt = config.get('pt', 1)  # 1=HTTP代理
         self.result_type = config.get('result_type', 'json')
-        self.min_proxies = config.get('min_proxies', 5)
+        # 在云服务器上设置更高的最小阈值，避免频繁获取
+        self.min_proxies = config.get('min_proxies', 10)
         self.get_interval = config.get('get_interval', 60)
         # 可选参数
         self.auto_white = config.get('auto_white')

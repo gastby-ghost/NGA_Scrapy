@@ -17,13 +17,11 @@ psutil>=5.9.0
 
 # Scrapy依赖
 twisted>=22.10.0
-Pillow>=8.0.0  # 图片处理库，ImagesPipeline 需要
-
-apscheduler>=3.9.0
-twisted>=22.10.0
-
+Pillow>=8.0.0
 PyYAML
-# 数据库驱动（可选，根据需要安装）
-# sqlite3 - Python内置，无需安装
-# pymysql>=1.1.0  # MySQL
-# psycopg2-binary>=2.9.0  # PostgreSQL
+
+# PostgreSQL驱动
+psycopg2-binary>=2.9.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
