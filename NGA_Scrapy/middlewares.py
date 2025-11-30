@@ -605,13 +605,12 @@ class PlaywrightMiddleware:
             def _fetch_page(browser_pool, url, cookies, browser_index):
                 browser, context = browser_pool[browser_index % len(browser_pool)]
                 page = context.new_page()
-                spider = self.spider  # 获取spider引用
 
                 try:
-                    spider.logger.debug(f"🌐 准备加载页面: {url} (使用浏览器 {browser_index % len(browser_pool)})")
+                    self.logger.debug(f"🌐 准备加载页面: {url} (使用浏览器 {browser_index % len(browser_pool)})")
 
                     if cookies:
-                        spider.logger.debug(f"🍪 设置 Cookies，共 {len(cookies)} 个")
+                        self.logger.debug(f"🍪 设置 Cookies，共 {len(cookies)} 个")
                         # 先清除旧的 cookies
                         context.clear_cookies()
                         # 添加新的 cookies
@@ -620,16 +619,16 @@ class PlaywrightMiddleware:
                         time.sleep(0.1)
 
                     # 设置 Referer 头部，模拟从首页跳转
-                    spider.logger.debug(f"📋 设置 Referer 头部")
+                    self.logger.debug(f"📋 设置 Referer 头部")
                     page.set_extra_http_headers({
                         'Referer': 'https://bbs.nga.cn/'
                     })
 
-                    spider.logger.debug(f"🚀 开始导航到页面...")
+                    self.logger.debug(f"🚀 开始导航到页面...")
                     nav_start = time.time()
                     page.goto(url, wait_until="domcontentloaded", timeout=15000)
                     nav_time = time.time() - nav_start
-                    spider.logger.debug(f"✅ 页面导航完成，耗时: {nav_time:.2f}s，URL: {page.url}")
+                    self.logger.debug(f"✅ 页面导航完成，耗时: {nav_time:.2f}s，URL: {page.url}")
 
                     alert_start = time.time()
                     self._handle_alert(page)
@@ -638,13 +637,13 @@ class PlaywrightMiddleware:
                     load_start = time.time()
                     page.wait_for_load_state("domcontentloaded", timeout=5000)
                     load_time = time.time() - load_start
-                    spider.logger.debug(f"⏱️ 页面加载完成: nav={nav_time:.2f}s, alert={alert_time:.2f}s, wait={load_time:.2f}s")
+                    self.logger.debug(f"⏱️ 页面加载完成: nav={nav_time:.2f}s, alert={alert_time:.2f}s, wait={load_time:.2f}s")
 
                     # 【关键改进】在返回前自动更新cookies
-                    spider.logger.debug(f"💾 更新 Cookies...")
+                    self.logger.debug(f"💾 更新 Cookies...")
                     self._save_cookies_if_updated(context)
 
-                    spider.logger.debug(f"📄 页面内容获取完成，字节数: {len(page.content())}")
+                    self.logger.debug(f"📄 页面内容获取完成，字节数: {len(page.content())}")
 
                     return {
                         'url': page.url,
@@ -652,10 +651,10 @@ class PlaywrightMiddleware:
                         'success': True
                     }
                 except Exception as e:
-                    spider.logger.error(f"❌ 页面加载失败: {url}，错误: {type(e).__name__}: {str(e)}")
+                    self.logger.error(f"❌ 页面加载失败: {url}，错误: {type(e).__name__}: {str(e)}")
                     raise
                 finally:
-                    spider.logger.debug(f"🔒 关闭页面实例")
+                    self.logger.debug(f"🔒 关闭页面实例")
                     page.close()
 
             # 轮询选择浏览器实例
