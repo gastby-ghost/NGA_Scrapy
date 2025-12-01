@@ -46,4 +46,3 @@ class Reply(Base):
     
     topic = relationship("Topic")
     user = relationship("User")
-    parent = relationship("Reply", remote_side=[rid])
