@@ -377,6 +377,9 @@ class PlaywrightMiddleware:
         self.proxy_manager = None
         self.last_stat_time = time.time()
         self._browser_index = 0  # 用于轮询选择浏览器实例
+        # 记录近期失败的浏览器实例，避免重复使用有问题的实例
+        self._failed_browsers = {}  # {browser_index: failure_time}
+        self._lock = threading.Lock()  # 线程锁保护_failed_browsers
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -657,32 +660,94 @@ class PlaywrightMiddleware:
                     self.logger.debug(f"🔒 关闭页面实例")
                     page.close()
 
-            # 轮询选择浏览器实例
-            browser_index = self._browser_index
-            self._browser_index = (self._browser_index + 1) % 1000000  # 防止溢出
+            # 获取当前可用的浏览器池大小
+            pool_size = len(self.browser_pool)
 
-            # 在Playwright工作线程中执行页面获取
-            result = self.browser_pool.execute(
-                _fetch_page,
-                request.url,
-                self.cookies,
-                browser_index
-            )
+            # 尝试多个不同的浏览器实例，避免某个实例被限制
+            max_browser_attempts = min(3, pool_size)  # 最多尝试3个实例
+            last_exception = None
+            attempted_browsers = []
 
-            self.browser_pool.stats.log_request(True, 1.0)
+            for attempt in range(max_browser_attempts):
+                # 轮询选择浏览器实例
+                browser_index = self._browser_index
+                self._browser_index = (self._browser_index + 1) % 1000000  # 防止溢出
 
-            return scrapy.http.HtmlResponse(
-                url=result['url'],
-                body=result['content'].encode('utf-8'),
-                encoding='utf-8',
-                request=request
-            )
+                # 检查该实例是否在失败黑名单中（5分钟内失败的实例）
+                with self._lock:
+                    if browser_index in self._failed_browsers:
+                        failure_time = self._failed_browsers[browser_index]
+                        if time.time() - failure_time < 300:  # 5分钟内的失败记录
+                            self.logger.debug(f"⏭️ 跳过黑名单中的浏览器实例 {browser_index % pool_size} (5分钟内失败过)")
+                            continue
+                        else:
+                            # 过期记录，清除它
+                            del self._failed_browsers[browser_index]
+
+                # 尝试当前浏览器实例
+                attempted_browsers.append(browser_index % pool_size)
+                self.logger.debug(f"🌐 尝试浏览器实例 {attempt + 1}/{max_browser_attempts}: {browser_index % pool_size} (URL: {request.url[:80]}...)")
+
+                try:
+                    # 在Playwright工作线程中执行页面获取
+                    result = self.browser_pool.execute(
+                        _fetch_page,
+                        request.url,
+                        self.cookies,
+                        browser_index
+                    )
+
+                    # 成功！清除该实例的失败记录（如果存在）
+                    with self._lock:
+                        if browser_index in self._failed_browsers:
+                            del self._failed_browsers[browser_index]
+
+                    self.browser_pool.stats.log_request(True, 1.0)
+                    self.logger.debug(f"✅ 浏览器实例 {browser_index % pool_size} 成功获取页面")
+
+                    return scrapy.http.HtmlResponse(
+                        url=result['url'],
+                        body=result['content'].encode('utf-8'),
+                        encoding='utf-8',
+                        request=request
+                    )
+                except (PlaywrightTimeoutError, Exception) as e:
+                    last_exception = e
+                    # 记录失败的浏览器实例
+                    with self._lock:
+                        self._failed_browsers[browser_index] = time.time()
+
+                    error_type = type(e).__name__
+                    self.logger.warning(f"⚠️ 浏览器实例 {browser_index % pool_size} 失败 ({error_type}): {str(e)[:100]}...")
+
+                    # 如果是最后一次尝试，抛出异常
+                    if attempt == max_browser_attempts - 1:
+                        self.logger.error(f"❌ 所有 {max_browser_attempts} 个浏览器实例都失败，放弃重试")
+                        raise e
+                    else:
+                        # 继续尝试下一个实例
+                        self.logger.debug(f"🔄 准备尝试下一个浏览器实例...")
+                        continue
+
+            # 如果到达这里，说明所有实例都失败了
+            # 这里不应该执行到，因为上面的循环会在最后一次尝试时抛出异常
+            if last_exception:
+                raise last_exception
         except PlaywrightTimeoutError as e:
-            # 超时错误，转换为可重试的响应（不显示为错误）
+            # 检查是否是"所有浏览器实例都失败"导致的超时
+            # 在这种情况下，不应该返回408，因为我们已经尝试了多个实例
+            # 而是应该记录为最终的失败
+
+            # 查看最近是否尝试了多个浏览器实例
+            # 如果是，说明这是最终失败，不是单实例超时
             self.browser_pool.stats.log_timeout()
             # 每100次超时输出一次统计
             if self.browser_pool.stats.timeout_errors % 100 == 0:
                 self.browser_pool.log_pool_status()
+
+            # 如果是一个浏览器实例失败，可能是暂时性问题，返回408让Scrapy重试
+            # 但我们已经改用多实例重试，所以这里主要是兜底处理
+            spider.logger.debug(f"⏰ 单实例超时，转换为408状态码进行重试: {request.url[:80]}...")
             # 返回 408 状态码，让 RetryMiddleware 自动重试
             return scrapy.http.Response(
                 url=request.url,
