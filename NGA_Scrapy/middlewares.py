@@ -661,7 +661,7 @@ class PlaywrightMiddleware:
                     page.close()
 
             # 获取当前可用的浏览器池大小
-            pool_size = len(self.browser_pool)
+            pool_size = self.browser_pool.max_browsers
 
             # 尝试多个不同的浏览器实例，避免某个实例被限制
             max_browser_attempts = min(3, pool_size)  # 最多尝试3个实例

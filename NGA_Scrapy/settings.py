@@ -54,8 +54,13 @@ USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # 启用重试中间件，处理超时等临时性问题
 RETRY_TIMES = 3  # 重试3次
 # 包含超时状态码和常见的反爬状态码
-RETRY_HTTP_CODES = [408, 440, 444, 460, 463, 494, 495, 496, 499, 500, 502, 503, 504]
+# 403是IP被封，需要重试（可能是临时性的）
+RETRY_HTTP_CODES = [403, 408, 440, 444, 460, 463, 494, 495, 496, 499, 500, 502, 503, 504]
 RETRY_ENABLED = True
+
+# 允许处理403错误（IP被封的情况会被重试）
+HTTPERROR_ALLOW_ALL = True
+HTTPERROR_ALLOWED_CODES = [200, 206, 301, 302, 403, 404, 500, 502, 503]
 
 # 代理配置
 PROXY_ENABLED = True  # 是否启用代理，默认为False（不使用代理）
