@@ -404,7 +404,7 @@ python -c "from database_config import print_config; print_config()"
 - tid (主键), title, poster_id (外键→user.uid), post_time, re_num, sampling_time, last_reply_date, partition
 
 ### reply表
-- rid (主键), tid (外键→topic.tid), parent_rid (外键→reply.rid), content, recommendvalue, poster_id (外键→user.uid), post_time, image_urls (JSON), image_paths (JSON), sampling_time
+- rid (主键), tid (外键→topic.tid), parent_rid, content, recommendvalue, poster_id (外键→user.uid), post_time, image_urls (JSON), image_paths (JSON), sampling_time
 
 ## 🛠️ 开发指南
 

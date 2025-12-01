@@ -35,7 +35,7 @@ class Reply(Base):
     
     rid = Column(String(20), primary_key=True)
     tid = Column(String(20), ForeignKey('topic.tid'))
-    parent_rid = Column(String(20), ForeignKey('reply.rid'))
+    parent_rid = Column(String(20))
     content = Column(Text)
     recommendvalue = Column(Integer)
     poster_id = Column(String(20), ForeignKey('user.uid'))
