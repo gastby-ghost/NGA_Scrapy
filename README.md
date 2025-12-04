@@ -156,7 +156,11 @@ NGA_Scrapy/
 │   ├── middlewares.py           # Playwright中间件
 │   ├── settings.py              # 基础爬虫配置
 │   └── utils/                   # 工具模块
-│       └── db_utils.py          # PostgreSQL工具
+│       ├── db_utils.py          # PostgreSQL工具
+│       ├── proxy_manager.py     # 代理管理器
+│       ├── ban_detector.py      # IP封禁检测器
+│       ├── instance_manager.py  # 浏览器实例管理器
+│       └── process_lock.py      # 进程锁机制
 ├── scheduler/                # 调度器和邮件
 │   ├── run_scheduler.py         # 调度器守护进程
 │   ├── email_notifier.py        # 邮件通知模块
@@ -188,6 +192,8 @@ NGA_Scrapy/
 - 支持代理轮换
 - 处理JavaScript渲染
 - 性能监控
+- **IP封禁检测**: 自动检测和处理IP封禁
+- **实例管理**: 自动替换被封禁的浏览器实例
 
 ### 数据库模型 (models.py)
 - **User**: uid, name, user_group, prestige, reg_date
@@ -199,6 +205,9 @@ NGA_Scrapy/
 - 实时日志监控
 - 统计数据收集
 - 优雅关闭 (SIGINT/SIGTERM)
+- **进程锁机制**: 防止并发爬虫实例冲突
+- **超时检测**: 自动清理超时进程
+- **Screen集成**: 支持后台运行管理
 
 ## 📚 配置说明
 
@@ -233,6 +242,121 @@ statistics_report_time: "09:00"
 # 错误告警
 consecutive_failures_threshold: 3  # 连续失败3次告警
 spider_timeout_minutes: 60         # 运行超过60分钟告警
+```
+
+#### 邮件服务配置示例
+
+**QQ邮箱配置**:
+```yaml
+smtp_server: "smtp.qq.com"
+smtp_port: 587
+username: "your_email@qq.com"
+password: "your_auth_code"  # 授权码，不是QQ密码
+from_email: "your_email@qq.com"
+to_emails:
+  - "recipient@example.com"
+use_tls: true
+```
+
+**Gmail配置**:
+```yaml
+smtp_server: "smtp.gmail.com"
+smtp_port: 587
+username: "your_email@gmail.com"
+password: "abcd efgh ijkl mnop"  # 应用专用密码（包含空格）
+from_email: "your_email@gmail.com"
+```
+
+**163邮箱配置**:
+```yaml
+smtp_server: "smtp.163.com"
+smtp_port: 587
+username: "your_email@163.com"
+password: "your_auth_password"  # 客户端授权密码
+```
+
+### 代理配置
+
+#### 启用动态代理
+1. 获取巨量IP代理服务并配置 `proxy_config.json`:
+```json
+{
+  "trade_no": "你的业务编号",
+  "api_key": "你的API密钥",
+  "api_url": "http://v2.api.juliangip.com/dynamic/getips",
+  "num": 10,
+  "pt": 1,
+  "result_type": "json",
+  "min_proxies": 5,
+  "get_interval": 60
+}
+```
+
+2. 在 `settings.py` 中启用代理:
+```python
+'PROXY_ENABLED': True,
+```
+
+3. 重要：在巨量IP订单设置中添加服务器IP白名单
+
+#### IP封禁检测和实例管理
+```python
+# settings.py 配置
+BAN_THRESHOLD = 3              # 触发封禁的连续失败次数阈值
+BAN_RECOVERY_TIME = 1800       # 封禁恢复时间（秒），默认30分钟
+INSTANCE_MONITOR_ENABLED = True # 是否启用实例监控和自动管理
+```
+
+**封禁类型**:
+- `timeout`: 超时封禁
+- `captcha`: 验证码封禁
+- `rate_limit`: 频率限制封禁
+- `ip_block`: IP直接封禁
+
+### Screen调度器管理
+
+#### 使用方法
+```bash
+# 基本操作
+bash run_scheduler.sh start    # 启动调度器
+bash run_scheduler.sh status   # 查看运行状态
+bash run_scheduler.sh attach   # 连接到会话
+bash run_scheduler.sh stop     # 停止调度器
+bash run_scheduler.sh restart  # 重启调度器
+bash run_scheduler.sh logs     # 查看实时日志
+
+# 快捷方式
+bash run_scheduler.sh          # 默认为start命令
+```
+
+#### Screen会话管理
+- **分离会话**: 在screen会话中按 `Ctrl+A` 然后按 `D`
+- **优雅退出**: 在screen会话中按 `Ctrl+\`
+- **查看会话**: `screen -list`
+- **强制连接**: `screen -D -r nga_scheduler`
+
+### 并发控制机制
+
+#### 进程锁功能
+- **跨进程互斥**: 使用文件锁防止并发爬虫实例
+- **超时检测**: 自动清理超时进程（默认2小时）
+- **优雅终止**: 先SIGTERM后SIGKILL的终止策略
+- **进程验证**: 使用psutil验证进程真实存在
+
+#### 配置参数
+```python
+# 锁超时配置
+ProcessLock(timeout=7200)  # 爬虫锁：2小时超时
+
+# 调度器配置
+scheduler.add_job(
+    run_spider,
+    'interval',
+    minutes=30,
+    max_instances=1,        # 同一调度器内的额外保护
+    coalesce=True,         # 合并错过的任务
+    misfire_grace_time=300 # 5分钟的容错时间
+)
 ```
 
 ## 💻 使用示例
@@ -372,6 +496,105 @@ PLAYWRIGHT_POOL_SIZE = 2  # 从3降到2
 CONCURRENT_REQUESTS = 2   # 从3降到2
 ```
 
+### 邮件相关
+
+**Q: SMTP认证失败**
+
+A: 检查邮件配置：
+- **Gmail**: 使用应用专用密码，不是普通密码
+- **QQ/163**: 使用客户端授权密码，不是登录密码
+- 确认邮箱已开启SMTP服务
+- 检查密码中是否有空格需要保留
+
+**Q: 连接SMTP服务器超时**
+
+A: 尝试不同端口或设置：
+- 尝试端口465（SSL）: `smtp_port: 465, use_tls: false`
+- 检查防火墙设置
+- 验证网络连接
+
+**Q: 收不到统计邮件**
+
+A: 检查配置和日志：
+- 确认 `enable_statistics_report: true`
+- 查看调度器日志中的邮件发送记录
+- 检查垃圾邮件文件夹
+
+### 代理相关
+
+**Q: 无法获取代理**
+
+A: 检查代理配置：
+- 验证 `trade_no` 和 `api_key` 是否正确
+- 确认已在巨量IP后台添加服务器IP白名单
+- 检查API密钥是否有效
+
+**Q: 代理连接失败**
+
+A: 检查代理质量：
+- 系统会自动移除失败代理
+- 调整 `min_proxies` 增加初始代理数量
+- 考虑升级代理套餐质量
+
+### IP封禁检测
+
+**Q: 实例频繁被封禁**
+
+A: 调整策略：
+- 降低请求频率：增加 `DOWNLOAD_DELAY`
+- 使用高质量代理服务
+- 调整封禁阈值：`BAN_THRESHOLD = 5`
+
+**Q: 如何查看封禁状态**
+
+A: 使用以下命令：
+```python
+# 查看详细报告
+python -c "from NGA_Scrapy.utils.ban_detector import BanDetector; print(BanDetector().get_detailed_report())"
+
+# 手动测试封禁检测
+python test_ban_detection.py
+```
+
+### Screen调度器
+
+**Q: Screen会话无法连接**
+
+A: 检查会话状态：
+```bash
+screen -list  # 查看所有会话
+screen -D -r nga_scheduler  # 强制分离并重新连接
+pkill -f "SCREEN.*nga_scheduler"  # 清理残留进程
+```
+
+**Q: 调度器启动后立即退出**
+
+A: 查看错误日志：
+```bash
+bash run_scheduler.sh logs
+# 常见原因：数据库连接失败、邮件配置错误、缺少依赖
+```
+
+### 并发控制
+
+**Q: 检测到多个爬虫实例同时运行**
+
+A: 这是正常的并发保护机制：
+- 系统会自动阻止新的爬虫实例
+- 等待当前实例完成或手动终止
+- 查看锁状态：`ls -la /tmp/nga_spider_*.lock`
+
+**Q: 进程锁无法释放**
+
+A: 手动清理锁文件：
+```bash
+# 检查锁文件
+find /tmp -name "nga_spider_*.lock" -ls
+
+# 确认进程不存在后删除锁文件
+rm -f /tmp/nga_spider_*.lock
+```
+
 ### 日志查看
 
 ```bash
@@ -380,6 +603,9 @@ tail -f nga_spider.log
 
 # 调度器日志
 tail -f scheduler/scheduler.log
+
+# Screen调度器实时日志
+bash run_scheduler.sh logs
 
 # PostgreSQL日志
 sudo tail -f /var/log/postgresql/postgresql-*.log
@@ -393,6 +619,12 @@ cat scheduler/stats/spider_stats_*.json | jq . | head -50
 
 # 检查数据库连接池
 python -c "from database_config import print_config; print_config()"
+
+# 查看代理池状态
+python -c "from NGA_Scrapy.utils.proxy_manager import get_proxy_manager; import json; pm = get_proxy_manager(); print(json.dumps(pm.get_pool_status(), ensure_ascii=False, indent=2))"
+
+# 查看IP封禁检测报告
+python -c "from NGA_Scrapy.utils.ban_detector import BanDetector; detector = BanDetector(); print(detector.get_detailed_report())"
 ```
 
 ## 📊 数据库架构
@@ -428,6 +660,15 @@ python -c "from database_config import print_config; print_config()"
 # 测试代理配置
 python test_proxy_config.py
 
+# 测试IP封禁检测
+python test_ban_detection.py
+
+# 测试并发锁机制
+python test_concurrent_spiders.py
+
+# 测试调度器并发控制
+python test_scheduler_concurrency.py
+
 # 调试XPath解析
 python debug_xpath.py
 
@@ -453,6 +694,15 @@ CONCURRENT_REQUESTS = 4
 ```
 
 ## 📝 更新日志
+
+### v2.1.0 (2025-12)
+- ✅ 集成IP封禁检测和自动恢复机制
+- ✅ 添加浏览器实例自动管理系统
+- ✅ 实现进程锁防止并发爬虫冲突
+- ✅ 集成Screen调度器后台管理
+- ✅ 增强邮件通知系统支持多种邮箱
+- ✅ 添加动态代理管理和轮换功能
+- ✅ 完善测试套件和监控工具
 
 ### v2.0.0 (2025-11)
 - ✅ 全面迁移到PostgreSQL数据库

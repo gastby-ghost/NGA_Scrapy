@@ -185,6 +185,9 @@ class NgaSpider(scrapy.Spider):
         rows = response.xpath('//*[contains(@class, "topicrow")]')
         self.logger.debug(f"📊 第 {page} 页主题列表共找到 {len(rows)} 个主题")
 
+        # 初始化计数器，防止没有找到主题时出现 UnboundLocalError
+        idx = 0
+
         for idx, row in enumerate(rows, 1):
             self.logger.debug(f"🔍 开始处理第 {page} 页第 {idx} 个主题")
             topic_link = row.xpath('.//a[contains(@class, "topic")]/@href').get()

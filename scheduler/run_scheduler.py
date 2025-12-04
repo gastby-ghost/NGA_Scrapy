@@ -11,6 +11,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 from pytz import timezone
 
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 导入进程锁模块
+try:
+    from NGA_Scrapy.utils.process_lock import ProcessLock, get_spider_status
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.error("无法导入 process_lock 模块")
+    sys.exit(1)
+
 # 获取项目根目录（scheduler 的父目录）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -20,8 +31,19 @@ try:
     from email_notifier import EmailNotifier, StatisticsCollector
 except ImportError:
     logger = logging.getLogger(__name__)
-    logger.error("无法导入 email_notifier 模块，请确保文件存在")
-    sys.exit(1)
+    logger.warning("无法导入 email_notifier 模块，邮件通知功能将不可用")
+    # 创建空的类以避免导入错误
+    class EmailNotifier:
+        def __init__(self, **kwargs):
+            pass
+        def send_alert(self, title, message, details=None):
+            pass
+        def send_statistics_report(self, stats):
+            return False
+
+    class StatisticsCollector:
+        def collect_statistics(self, start_date, end_date):
+            return None
 
 # 配置日志
 logging.basicConfig(
@@ -37,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 # 全局变量
 spider_process = None
+process_lock = None
 shutdown_requested = False
 email_notifier = None
 stats_collector = None
@@ -88,7 +111,7 @@ def load_config():
 
 def signal_handler(signum, frame):
     """信号处理器：优雅关闭调度器和子进程"""
-    global shutdown_requested
+    global shutdown_requested, process_lock
     logger.info(f"收到信号 {signum}，开始优雅关闭...")
     shutdown_requested = True
 
@@ -106,6 +129,15 @@ def signal_handler(signum, frame):
             spider_process.kill()
             spider_process.wait()
 
+    # 释放进程锁
+    if process_lock:
+        try:
+            logger.info("正在释放进程锁...")
+            process_lock.release()
+            logger.info("✅ 进程锁已释放")
+        except Exception as e:
+            logger.error(f"释放进程锁时出错: {e}")
+
     # 关闭调度器
     scheduler.shutdown(wait=False)
     logger.info("调度器已关闭")
@@ -113,16 +145,24 @@ def signal_handler(signum, frame):
 
 def run_spider():
     """执行爬虫任务，带重试机制和状态监控"""
-    global spider_process, consecutive_failures, spider_start_time, error_rates, first_run_completed
+    global spider_process, process_lock, consecutive_failures, spider_start_time, error_rates, first_run_completed
 
     # 检查是否有关闭请求
     if shutdown_requested:
         logger.info("跳过爬虫执行（已请求关闭）")
         return
 
-    # 检查是否有正在运行的爬虫进程
+    # 检查进程锁，防止并发运行
+    spider_status = get_spider_status()
+    if spider_status['running']:
+        duration = spider_status.get('duration', 0)
+        pid = spider_status.get('pid')
+        logger.warning(f"检测到爬虫实例正在运行 (PID: {pid}, 运行时长: {duration:.1f}秒)，跳过本次执行")
+        return
+
+    # 检查当前进程管理的爬虫是否还在运行
     if spider_process and spider_process.poll() is None:
-        logger.warning("检测到爬虫仍在运行，跳过本次执行")
+        logger.warning(f"当前调度的爬虫仍在运行 (PID: {spider_process.pid})，跳过本次执行")
         return
 
     spider_start_time = datetime.now()
@@ -134,6 +174,18 @@ def run_spider():
         logger.info("=" * 60)
         logger.info(f"开始执行爬虫任务 - {datetime.now()}")
         logger.info("=" * 60)
+
+        # 获取进程锁
+        lock_timeout = 7200  # 2小时超时
+        process_lock = ProcessLock(timeout=lock_timeout)
+
+        if not process_lock.acquire(blocking=False):
+            logger.error("无法获取进程锁，可能有其他爬虫实例正在运行")
+            consecutive_failures += 1
+            check_error_alerts(-1, ["无法获取进程锁"])
+            return
+
+        logger.info("✅ 成功获取进程锁，开始启动爬虫")
 
         # 使用Popen代替run()，避免阻塞
         # 使用settings_cloud配置（云服务器优化参数）
@@ -215,6 +267,12 @@ def run_spider():
 
         spider_process = None
 
+        # 释放进程锁
+        if process_lock:
+            process_lock.release()
+            process_lock = None
+            logger.info("✅ 进程锁已释放")
+
         # 尝试从日志文件中获取统计信息（更可靠的方法）
         if not spider_stats:
             spider_stats = _parse_stats_from_log()
@@ -243,6 +301,16 @@ def run_spider():
         consecutive_failures += 1
         error_output = [str(e)]
         spider_process = None
+
+        # 确保释放进程锁
+        if process_lock:
+            try:
+                process_lock.release()
+                logger.info("✅ 异常情况下已释放进程锁")
+            except Exception as lock_error:
+                logger.error(f"释放进程锁时出错: {lock_error}")
+            finally:
+                process_lock = None
 
         # 记录错误率
         error_rates.append(100)
@@ -539,6 +607,26 @@ if __name__ == '__main__':
     # 启动调度器
     scheduler.start()
 
+    # 定期清理过期锁
+    def cleanup_stale_locks():
+        """定期清理过期的锁文件"""
+        try:
+            lock = ProcessLock(timeout=3600)  # 1小时超时
+            if lock._cleanup_stale_lock():
+                logger.info("✅ 清理过期锁完成")
+        except Exception as e:
+            logger.error(f"清理过期锁时出错: {e}")
+
+    # 添加锁清理任务（每10分钟执行一次）
+    scheduler.add_job(
+        cleanup_stale_locks,
+        'interval',
+        minutes=10,
+        id='cleanup_locks_job',
+        max_instances=1
+    )
+    logger.info("锁清理任务已添加：每10分钟执行一次")
+
     # 主循环
     try:
         while True:
@@ -550,8 +638,12 @@ if __name__ == '__main__':
                         next_run = job.next_run_time
                         break
 
+                # 获取爬虫状态信息
+                spider_status = get_spider_status()
                 if spider_process and spider_process.poll() is None:
                     logger.debug(f"调度器运行中 | 爬虫PID: {spider_process.pid} | 下次执行: {next_run}")
+                elif spider_status['running']:
+                    logger.debug(f"调度器运行中 | 外部爬虫PID: {spider_status.get('pid')} | 运行时长: {spider_status.get('duration', 0):.1f}秒 | 下次执行: {next_run}")
                 else:
                     logger.debug(f"调度器运行中 | 下次执行: {next_run}")
 

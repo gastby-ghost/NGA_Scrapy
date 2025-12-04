@@ -66,3 +66,8 @@ HTTPERROR_ALLOWED_CODES = [200, 206, 301, 302, 403, 404, 500, 502, 503]
 PROXY_ENABLED = True  # 是否启用代理，默认为False（不使用代理）
 PROXY_CONFIG_FILE = 'proxy_config.json'  # 代理配置文件路径
 
+# 封禁检测和实例管理配置
+BAN_THRESHOLD = 3  # 触发封禁的失败次数阈值
+BAN_RECOVERY_TIME = 1800  # 封禁恢复时间（秒），默认30分钟
+INSTANCE_MONITOR_ENABLED = True  # 是否启用实例监控和自动管理
+
