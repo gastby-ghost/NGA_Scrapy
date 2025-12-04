@@ -730,13 +730,25 @@ class PlaywrightMiddleware:
                     # 第一次尝试使用管理器推荐的实例
                     browser_index = selected_instance_id
                 else:
-                    # 后续尝试使用轮询
-                    browser_index = self._browser_index
-                    self._browser_index = (self._browser_index + 1) % 1000000  # 防止溢出
+                    # 后续尝试使用轮询（确保ID在有效范围内）
+                    browser_index = self._browser_index % pool_size
+                    self._browser_index += 1
+
+                # 确保实例已注册到BanDetector
+                if self.instance_manager and browser_index not in self.ban_detector.browser_instances:
+                    proxy_address = None
+                    if self.proxy_manager:
+                        try:
+                            proxy_dict = self.proxy_manager.get_random_proxy()
+                            proxy_address = proxy_dict.get('proxy') if proxy_dict else None
+                        except:
+                            pass
+                    self.instance_manager.register_instance(browser_index, proxy_address)
+                    self.logger.debug(f"注册浏览器实例: {browser_index}")
 
                 # 检查实例是否被封禁
                 if self.instance_manager and self.ban_detector.is_instance_banned(browser_index):
-                    self.logger.debug(f"⏭️ 跳过被封禁的浏览器实例 {browser_index % pool_size}")
+                    self.logger.debug(f"⏭️ 跳过被封禁的浏览器实例 {browser_index}")
                     continue
 
                 # 检查该实例是否在旧的黑名单中（5分钟内失败的实例）- 保留作为备用
@@ -744,15 +756,15 @@ class PlaywrightMiddleware:
                     if browser_index in self._failed_browsers:
                         failure_time = self._failed_browsers[browser_index]
                         if time.time() - failure_time < 300:  # 5分钟内的失败记录
-                            self.logger.debug(f"⏭️ 跳过黑名单中的浏览器实例 {browser_index % pool_size} (5分钟内失败过)")
+                            self.logger.debug(f"⏭️ 跳过黑名单中的浏览器实例 {browser_index} (5分钟内失败过)")
                             continue
                         else:
                             # 过期记录，清除它
                             del self._failed_browsers[browser_index]
 
                 # 尝试当前浏览器实例
-                attempted_browsers.append(browser_index % pool_size)
-                self.logger.debug(f"🌐 尝试浏览器实例 {attempt + 1}/{max_browser_attempts}: {browser_index % pool_size} (URL: {request.url[:80]}...)")
+                attempted_browsers.append(browser_index)
+                self.logger.debug(f"🌐 尝试浏览器实例 {attempt + 1}/{max_browser_attempts}: {browser_index} (URL: {request.url[:80]}...)")
 
                 try:
                     # 在Playwright工作线程中执行页面获取
@@ -775,7 +787,7 @@ class PlaywrightMiddleware:
                             del self._failed_browsers[browser_index]
 
                     self.browser_pool.stats.log_request(True, 1.0)
-                    self.logger.debug(f"✅ 浏览器实例 {browser_index % pool_size} 成功获取页面 (耗时: {response_time:.2f}s)")
+                    self.logger.debug(f"✅ 浏览器实例 {browser_index} 成功获取页面 (耗时: {response_time:.2f}s)")
 
                     return scrapy.http.HtmlResponse(
                         url=result['url'],
@@ -796,11 +808,11 @@ class PlaywrightMiddleware:
                         self._failed_browsers[browser_index] = time.time()
 
                     error_type = type(e).__name__
-                    self.logger.warning(f"⚠️ 浏览器实例 {browser_index % pool_size} 失败 ({error_type}): {str(e)[:100]}...")
+                    self.logger.warning(f"⚠️ 浏览器实例 {browser_index} 失败 ({error_type}): {str(e)[:100]}...")
 
                     # 如果实例被封禁，记录特殊信息
                     if is_banned:
-                        self.logger.warning(f"🚫 实例 {browser_index % pool_size} 已被标记为封禁，将自动替换")
+                        self.logger.warning(f"🚫 实例 {browser_index} 已被标记为封禁，将自动替换")
 
                     # 如果是最后一次尝试，抛出异常
                     if attempt == max_browser_attempts - 1:
