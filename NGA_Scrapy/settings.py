@@ -19,14 +19,14 @@ ITEM_PIPELINES = {
 IMAGES_STORE = 'download_images'
 
 
-PLAYWRIGHT_POOL_SIZE = 8  # 增加浏览器池大小，充分利用内存和CPU
+PLAYWRIGHT_POOL_SIZE = 3  # 增加浏览器池大小，充分利用内存和CPU
 DOWNLOAD_TIMEOUT = 25     # 稍微增加超时时间，避免频繁超时
 
 # 遵守 robots.txt 规则
 ROBOTSTXT_OBEY = False
 
 # 配置日志
-LOG_LEVEL = 'DEBUG'
+LOG_LEVEL = 'INFO'
 
 # 日志配置
 LOG_FILE = 'nga_spider.log'
@@ -40,7 +40,7 @@ LOG_DATEFORMAT = '%Y-%m-%d %H:%M:%S'
 
 # 优化并发配置，提高爬取速度
 CONCURRENT_REQUESTS = 12  # 增加并发请求数，充分利用性能
-CONCURRENT_REQUESTS_PER_DOMAIN = 6  # 每个域名的并发数
+CONCURRENT_REQUESTS_PER_DOMAIN = 3  # 每个域名的并发数
 DOWNLOAD_DELAY = 0.5  # 减少延迟到0.5秒，平衡速度和稳定性
 AUTOTHROTTLE_ENABLED = True  # 启用自动限速
 AUTOTHROTTLE_START_DELAY = 0.5  # 初始延迟 0.5 秒
