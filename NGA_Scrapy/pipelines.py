@@ -125,6 +125,8 @@ from scrapy.pipelines.images import ImagesPipeline
 class NgaPipeline:
     def __init__(self):
         self.session = None
+        self.item_count = 0
+        self.batch_size = 100  # 每100个item提交一次
 
     def _clean_recommendvalue(self, value):
         """清理recommendvalue字段，确保为有效整数"""
@@ -147,6 +149,9 @@ class NgaPipeline:
     def close_spider(self, spider):
         if self.session:
             try:
+                # 关闭前提交剩余的数据
+                self.session.commit()
+                spider.logger.info(f"Final commit: {self.item_count} items processed")
                 self.session.close()
             except Exception as e:
                 spider.logger.error(f"Error closing session: {e}")
@@ -159,7 +164,12 @@ class NgaPipeline:
                 self._process_topic(item)
             elif isinstance(item, ReplyItem):
                 self._process_reply(item)
-            self.session.commit()
+
+            self.item_count += 1
+            # 批量提交，每batch_size个item提交一次
+            if self.item_count % self.batch_size == 0:
+                self.session.commit()
+                spider.logger.debug(f"Batch commit: {self.item_count} items")
         except SQLAlchemyError as e:
             self.session.rollback()
             spider.logger.error(f"Database error: {e}")
