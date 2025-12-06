@@ -19,14 +19,14 @@ ITEM_PIPELINES = {
 IMAGES_STORE = 'download_images'
 
 
-PLAYWRIGHT_POOL_SIZE = 3  # 增加浏览器池大小，充分利用内存和CPU
-DOWNLOAD_TIMEOUT = 25     # 稍微增加超时时间，避免频繁超时
+PLAYWRIGHT_POOL_SIZE = 8  # 大幅增加浏览器池大小，应对两阶段优化的高并发
+DOWNLOAD_TIMEOUT = 30     # 增加超时时间，应对高负载
 
 # 遵守 robots.txt 规则
 ROBOTSTXT_OBEY = False
 
 # 配置日志
-LOG_LEVEL = 'INFO'
+LOG_LEVEL = 'DEBUG'
 
 # 日志配置
 LOG_FILE = 'nga_spider.log'
@@ -38,25 +38,32 @@ LOG_DATEFORMAT = '%Y-%m-%d %H:%M:%S'
 # 全局设置
 # 已在上面定义：LOG_LEVEL, LOG_FILE, LOG_FORMAT, LOG_DATEFORMAT, LOG_FILE_MAX_BYTES, LOG_FILE_BACKUP_COUNT
 
-# 优化并发配置，提高爬取速度
-CONCURRENT_REQUESTS = 10  # 增加并发请求数，充分利用性能
-CONCURRENT_REQUESTS_PER_DOMAIN = 5  # 每个域名的并发数
-DOWNLOAD_DELAY = 0.5  # 减少延迟到0.5秒，平衡速度和稳定性
+# 优化并发配置，平衡性能和稳定性（避免过载）
+# 降低并发数到6，与浏览器池大小匹配，避免队列拥塞
+CONCURRENT_REQUESTS = 6  # 与浏览器池大小匹配
+CONCURRENT_REQUESTS_PER_DOMAIN = 6  # 每个域名的并发数
+DOWNLOAD_DELAY = 0.3  # 适度延迟，平衡速度和稳定性
 AUTOTHROTTLE_ENABLED = True  # 启用自动限速
-AUTOTHROTTLE_START_DELAY = 0.5  # 初始延迟 0.5 秒
-AUTOTHROTTLE_MAX_DELAY = 45  # 最大延迟 45 秒
-AUTOTHROTTLE_TARGET_CONCURRENCY = 4.0  # 目标并发数提高
+AUTOTHROTTLE_START_DELAY = 0.3  # 初始延迟
+AUTOTHROTTLE_MAX_DELAY = 30  # 最大延迟，给系统更多恢复时间
+AUTOTHROTTLE_TARGET_CONCURRENCY = 6.0  # 目标并发数，更保守的设置
 HTTPCACHE_ENABLED = False
 HTTPCACHE_EXPIRATION_SECS = 186400  # 缓存 1 天
 IMAGES_PIPELINE_MAX_SIZE = 1024*1024*5  # 限制最大图片尺寸(5MB)
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 # 启用重试中间件，处理超时等临时性问题
-RETRY_TIMES = 3  # 重试3次
+RETRY_TIMES = 2  # 减少重试次数，避免过多重试加剧拥堵
 # 包含超时状态码和常见的反爬状态码
 # 403是IP被封，需要重试（可能是临时性的）
 RETRY_HTTP_CODES = [403, 408, 440, 444, 460, 463, 494, 495, 496, 499, 500, 502, 503, 504]
 RETRY_ENABLED = True
+
+# 新增：优化调度器配置，处理大量请求
+SCHEDULER_PRIORITY_QUEUE = 'scrapy.pqueues.ScrapyPriorityQueue'
+DOWNLOAD_MAXSIZE = 1073741824  # 1GB，允许更大的响应
+COOKIES_ENABLED = True  # 确保cookies功能开启
+DUPEFILTER_CLASS = 'scrapy.dupefilters.RFPDupeFilter'  # 使用标准去重器
 
 # 允许处理403错误（IP被封的情况会被重试）
 HTTPERROR_ALLOW_ALL = True

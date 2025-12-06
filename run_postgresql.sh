@@ -167,7 +167,8 @@ echo "日志文件: nga_spider.log"
 echo "按 Ctrl+C 停止"
 echo ""
 
-scrapy crawl nga -s SETTINGS_MODULE=settings_cloud
+# 设置环境变量以使用 settings_cloud.py 配置
+scrapy crawl nga
 
 echo ""
 echo "========================================="

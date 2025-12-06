@@ -163,8 +163,8 @@ class BrowserInstanceManager:
 
         while self._running:
             try:
-                # 每5分钟检查一次
-                for _ in range(30):  # 5分钟 = 300秒，每次检查间隔10秒
+                # 每1分钟检查一次，更及时的监控
+                for _ in range(6):  # 1分钟 = 60秒，每次检查间隔10秒
                     if not self._running:
                         return
                     time.sleep(10)
@@ -172,15 +172,16 @@ class BrowserInstanceManager:
                 # 检查所有实例状态
                 self._check_instances_health()
 
-                # 每30分钟输出一次统计报告
-                if time.time() % 1800 < 10:  # 简单的时间检查
+                # 每15分钟输出一次统计报告
+                current_minutes = int(time.time()) // 60
+                if current_minutes % 15 == 0:
                     self._log_status_report()
 
             except Exception as e:
                 self.logger.error(f"监控线程出错: {e}")
                 if not self._running:
                     break
-                time.sleep(60)  # 出错后等待1分钟再继续
+                time.sleep(30)  # 出错后等待30秒再继续
 
         self.logger.info("👁️ 实例监控线程已退出")
 
@@ -189,17 +190,31 @@ class BrowserInstanceManager:
         try:
             # 获取所有可用实例
             available_instances = self.ban_detector.get_available_instances()
-            self.logger.debug(f"当前可用实例数: {len(available_instances)}")
+            self.logger.info(f"📊 [实例健康检查] 当前可用实例数: {len(available_instances)}")
+            
+            # 【诊断日志】详细记录实例状态
+            all_instances = self.ban_detector.browser_instances
+            active_count = sum(1 for inst in all_instances.values() if inst.get('status') == 'active')
+            banned_count = sum(1 for inst in all_instances.values() if inst.get('status') == 'banned')
+            unknown_count = len(all_instances) - active_count - banned_count
+            
+            self.logger.info(f"📊 [实例状态详情] 总计: {len(all_instances)}, 活跃: {active_count}, 封禁: {banned_count}, 未知: {unknown_count}")
 
             # 如果可用实例太少，检查是否需要强制替换
-            if len(available_instances) < self.max_instances // 2:
+            min_available = max(2, self.max_instances // 3)  # 至少需要2个，或总数的1/3
+            if len(available_instances) < min_available:
                 self.logger.warning(
                     f"⚠️ 可用实例过少 ({len(available_instances)}/{self.max_instances})，"
-                    "检查是否需要强制替换"
+                    f"低于最小要求 {min_available}，开始强制替换"
                 )
 
                 # 强制替换一些有问题的实例
                 self._force_replace_problematic_instances()
+            elif len(available_instances) < self.max_instances * 0.6:  # 60%警告阈值
+                self.logger.info(
+                    f"ℹ️ 可用实例偏少 ({len(available_instances)}/{self.max_instances})，"
+                    "建议关注实例状态"
+                )
 
         except Exception as e:
             self.logger.error(f"检查实例健康状态时出错: {e}")
@@ -210,31 +225,89 @@ class BrowserInstanceManager:
             # 获取所有实例的状态
             all_instances = self.ban_detector.browser_instances
 
-            # 找出频繁失败但未被标记为封禁的实例
+            self.logger.info(f"🔍 检查所有实例状态，总数: {len(all_instances)} (预期: {self.max_instances})")
+
+            # 如果总实例数远低于预期，说明初始化失败或大量实例崩溃
+            if len(all_instances) < self.max_instances * 0.5:  # 实例数少于预期的50%
+                self.logger.error(
+                    f"⚠️ 实例数严重不足! 当前: {len(all_instances)}, 预期: {self.max_instances}, "
+                    f"缺口: {self.max_instances - len(all_instances)}. 这表明浏览器池初始化失败或大量实例崩溃!"
+                )
+
+                # 输出详细诊断信息
+                for instance_id, instance in all_instances.items():
+                    last_success = instance.get('last_success', 0)
+                    status = instance.get('status', 'unknown')
+                    total_requests = instance.get('total_requests', 0)
+                    success_requests = instance.get('success_requests', 0)
+                    time_since_success = time.time() - last_success if last_success > 0 else -1
+
+                    self.logger.error(
+                        f"实例 {instance_id} 诊断: 状态={status}, 总请求={total_requests}, "
+                        f"成功={success_requests}, 最后成功={int(time_since_success)}秒前"
+                    )
+
+            # 找出所有不可用的实例
             problematic_instances = []
             for instance_id, instance in all_instances.items():
-                if instance['status'] != 'active':
-                    continue
+                status = instance.get('status', 'unknown')
+                self.logger.debug(f"实例 {instance_id} 状态: {status}, 请求数: {instance.get('total_requests', 0)}")
 
-                # 检查最近的失败率
-                recent_requests = instance['total_requests']
-                if recent_requests < 5:  # 请求数太少，不足以判断
-                    continue
-
-                recent_failures = len(instance['failures'])
-                failure_rate = recent_failures / recent_requests
-
-                # 如果失败率超过60%，认为是问题实例
-                if failure_rate > 0.6:
+                # 任何非active状态的实例都认为是问题实例
+                if status != 'active':
                     problematic_instances.append(instance_id)
+                    self.logger.warning(f"🚫 发现非活跃实例: {instance_id} (状态: {status})")
+                    continue
 
-            # 强制替换问题实例（最多2个）
-            for instance_id in problematic_instances[:2]:
-                self.logger.warning(f"🔧 强制替换问题实例: {instance_id}")
-                self._schedule_replacement(instance_id, priority=2)
+                # 对于活跃实例，检查失败率
+                recent_requests = instance.get('total_requests', 0)
+                if recent_requests >= 5:  # 只有足够的请求数才判断失败率
+                    recent_failures = len(instance.get('failures', []))
+                    failure_rate = recent_failures / recent_requests
+
+                    # 如果失败率超过30%（降低阈值），认为是问题实例
+                    if failure_rate > 0.3:
+                        problematic_instances.append(instance_id)
+                        self.logger.warning(f"⚠️ 发现高失败率实例: {instance_id} (失败率: {failure_rate:.1%})")
+
+            # 强制替换问题实例（最多3个，增加数量）
+            if problematic_instances:
+                self.logger.warning(f"🎯 发现 {len(problematic_instances)} 个问题实例，准备替换")
+
+                for i, instance_id in enumerate(problematic_instances[:3]):
+                    self.logger.warning(f"🔧 强制替换问题实例 {i+1}/3: {instance_id} (状态: {all_instances[instance_id].get('status', 'unknown')})")
+                    self._schedule_replacement(instance_id, priority=1)  # 使用最高优先级
+            else:
+                # 如果实例数远低于预期但找不到明显的问题实例，使用强制替换
+                if len(all_instances) < self.max_instances * 0.5:
+                    self.logger.warning(f"🔴 实例数严重不足，使用强制替换策略")
+                    # 随机替换一个活跃实例，使用强制模式
+                    active_instances = [iid for iid, instance in all_instances.items()
+                                     if instance.get('status') == 'active']
+                    if active_instances:
+                        target_id = active_instances[0]
+                        self.logger.warning(f"⚡ 强制替换疑似卡住的活跃实例: {target_id}")
+                        # 100ms后调用，传递force参数
+                        if self._running:
+                            # 使用默认参数捕获当前target_id值
+                            threading.Timer(0.1, lambda tid=target_id: self._execute_replacement(
+                                ReplacementTask(tid, time.time(), 1),
+                                force=True
+                            )).start()
+                else:
+                    self.logger.warning("🤔 未找到明显的问题实例，尝试随机替换一个活跃实例以恢复")
+                    # 如果没有找到问题实例，随机替换一个活跃实例来强制刷新
+                    active_instances = [iid for iid, instance in all_instances.items()
+                                     if instance.get('status') == 'active']
+                    if active_instances:
+                        target_id = active_instances[0]
+                        self.logger.warning(f"🎲 随机替换活跃实例以恢复: {target_id}")
+                        self._schedule_replacement(target_id, priority=1)
 
         except Exception as e:
             self.logger.error(f"强制替换问题实例时出错: {e}")
+            import traceback
+            self.logger.error(f"详细错误: {traceback.format_exc()}")
 
     def _replacement_worker(self):
         """替换工作线程"""
@@ -261,14 +334,14 @@ class BrowserInstanceManager:
 
         self.logger.info("🔧 实例替换线程已退出")
 
-    def _execute_replacement(self, task: ReplacementTask):
+    def _execute_replacement(self, task: ReplacementTask, force: bool = False):
         """执行实例替换"""
         instance_id = task.failed_instance_id
-        self.logger.info(f"🔄 开始替换实例: {instance_id}")
+        self.logger.info(f"🔄 开始替换实例: {instance_id} {'(强制模式)' if force else ''}")
 
         try:
             # 检查实例状态，确保确实需要替换
-            if not self._should_replace_instance(instance_id):
+            if not self._should_replace_instance(instance_id, force=force):
                 self.logger.debug(f"实例 {instance_id} 不需要替换，跳过")
                 return
 
@@ -318,7 +391,7 @@ class BrowserInstanceManager:
             self.logger.error(f"执行替换任务时出错: {e}")
             self.stats['failed_replacements'] += 1
 
-    def _should_replace_instance(self, instance_id: int) -> bool:
+    def _should_replace_instance(self, instance_id: int, force: bool = False) -> bool:
         """检查是否应该替换实例"""
         # 检查是否被封禁
         if self.ban_detector.is_instance_banned(instance_id):
@@ -328,6 +401,33 @@ class BrowserInstanceManager:
         if instance_id not in self.ban_detector.browser_instances:
             self.logger.warning(f"实例 {instance_id} 不存在于检测器中")
             return True
+
+        # 检查实例是否卡住（新增逻辑）
+        instance = self.ban_detector.browser_instances[instance_id]
+        current_time = time.time()
+        last_success = instance.get('last_success', 0)
+        total_requests = instance.get('total_requests', 0)
+        success_requests = instance.get('success_requests', 0)
+        status = instance.get('status', 'unknown')
+
+        # 如果是强制替换模式，直接返回True
+        if force:
+            return True
+
+        # 检测卡住条件：
+        # 1. 实例状态为active但长时间没有成功请求
+        if status == 'active':
+            # 如果距离最后成功超过5分钟，且总请求数>50但成功率极低，可能是卡住
+            if current_time - last_success > 300:  # 5分钟无响应
+                if total_requests > 50:
+                    success_rate = success_requests / total_requests if total_requests > 0 else 0
+                    if success_rate < 0.1:  # 成功率低于10%
+                        self.logger.warning(
+                            f"检测到卡住实例 {instance_id}: "
+                            f"最后成功时间: {int(current_time - last_success)}秒前, "
+                            f"总请求: {total_requests}, 成功率: {success_rate:.1%}"
+                        )
+                        return True
 
         return False
 

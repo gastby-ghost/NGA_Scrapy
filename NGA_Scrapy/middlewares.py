@@ -3,38 +3,69 @@ import json
 import os
 import time
 import threading
-import signal
-import sys
-from queue import Queue, Empty
-from contextlib import contextmanager
-from datetime import datetime
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
-from scrapy.exceptions import NotConfigured
-from typing import Optional, Dict, List, Tuple
-from scrapy.downloadermiddlewares.retry import RetryMiddleware
-from scrapy.utils.response import response_status_message
-import random
-from concurrent.futures import ThreadPoolExecutor, Future
 import uuid
+from queue import Queue, Empty
+from typing import Optional, Dict, List, Callable, Any
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+from scrapy.exceptions import NotConfigured
 from scrapy import signals
 from NGA_Scrapy.utils.proxy_manager import get_proxy_manager
-from NGA_Scrapy.utils.ban_detector import BanDetector, BanType
+from NGA_Scrapy.utils.ban_detector import BanDetector
 from NGA_Scrapy.utils.instance_manager import BrowserInstanceManager
 
+
+# ========== 配置常量 ==========
+DEFAULT_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Linux"',
+    'Upgrade-Insecure-Requests': '1'
+}
+
+BROWSER_ARGS = [
+    '--disable-gpu',
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-extensions',
+    '--disable-infobars',
+    '--disable-notifications',
+]
+
+DEFAULT_VIEWPORT = {'width': 1920, 'height': 1080}
+REQUEST_TIMEOUT = 60
+NAV_TIMEOUT = 15000
+LOAD_TIMEOUT = 5000
+
+
+# ========== 工具类 ==========
 class PerformanceStats:
-    """性能统计工具类"""
+    """简化的性能统计工具类"""
     def __init__(self):
-        self.start_time = time.time()
-        self.request_count = 0
-        self.success_count = 0
-        self.failed_count = 0
-        self.total_page_time = 0
-        self.max_page_time = 0
-        self.min_page_time = float('inf')
-        self.browser_recycles = 0
-        self.timeout_errors = 0
         self._lock = threading.Lock()
+        self._start_time = time.time()
+        self.reset()
+
+    def reset(self):
+        """重置统计数据"""
+        with self._lock:
+            self.request_count = 0
+            self.success_count = 0
+            self.failed_count = 0
+            self.total_page_time = 0.0
+            self.max_page_time = 0.0
+            self.min_page_time = float('inf')
+            self.browser_recycles = 0
+            self.timeout_errors = 0
 
     def log_request(self, success: bool, duration: float):
         """记录请求统计"""
@@ -59,158 +90,279 @@ class PerformanceStats:
             self.timeout_errors += 1
 
     def get_stats(self) -> Dict:
-        """获取当前统计信息"""
-        avg_time = (self.total_page_time / self.success_count) if self.success_count > 0 else 0
-        uptime = time.time() - self.start_time
-        return {
-            'uptime': uptime,
-            'requests': self.request_count,
-            'success_rate': f"{(self.success_count / self.request_count * 100):.2f}%" if self.request_count > 0 else "0%",
-            'avg_page_time': f"{avg_time:.3f}s",
-            'max_page_time': f"{self.max_page_time:.3f}s",
-            'min_page_time': f"{self.min_page_time:.3f}s" if self.min_page_time != float('inf') else "N/A",
-            'browser_recycles': self.browser_recycles,
-            'timeout_errors': self.timeout_errors,
-            'req_per_minute': f"{(self.request_count / (uptime / 60)):.2f}" if uptime > 0 else "N/A"
-        }
+        """获取统计信息"""
+        with self._lock:
+            uptime = time.time() - self._start_time
+            avg_time = (self.total_page_time / self.success_count) if self.success_count > 0 else 0
 
-class BrowserPool:
-    """Playwright浏览器连接池（带性能监控）- 线程安全版本"""
-    def __init__(self, max_browsers: int = 4, spider_logger=None, proxy_manager=None):
-        self.max_browsers = max_browsers
-        self.logger = spider_logger
-        self.stats = PerformanceStats()
-        self.proxy_manager = proxy_manager
-        self._request_queue = Queue()
-        self._result_map = {}
-        self._lock = threading.Lock()
-        self._condition = threading.Condition(self._lock)
-        self._playwright_thread = None
-        self._stop_event = threading.Event()
-        self._initialized = False
-        self._init_condition = threading.Condition(self._lock)
-        self._shutdown_handled = False
+            return {
+                'uptime': f"{uptime:.1f}s",
+                'requests': self.request_count,
+                'success_rate': f"{(self.success_count / self.request_count * 100):.2f}%" if self.request_count > 0 else "0%",
+                'avg_page_time': f"{avg_time:.3f}s",
+                'max_page_time': f"{self.max_page_time:.3f}s",
+                'min_page_time': f"{self.min_page_time:.3f}s" if self.min_page_time != float('inf') else "N/A",
+                'browser_recycles': self.browser_recycles,
+                'timeout_errors': self.timeout_errors,
+                'req_per_minute': f"{(self.request_count / (uptime / 60)):.2f}" if uptime > 0 else "N/A"
+            }
 
-        # 启动Playwright工作线程（改为非守护线程以确保正确关闭）
-        self._start_playwright_thread()
 
-        # 等待初始化完成
-        with self._init_condition:
-            while not self._initialized:
-                self._init_condition.wait(timeout=1)
+# ========== Cookie管理 ==========
+class CookieManager:
+    """Cookie管理器 - 独立职责"""
+    def __init__(self, logger):
+        self.logger = logger
+        self.cookies = None
 
-    def _start_playwright_thread(self):
-        """启动Playwright工作线程"""
-        self._playwright_thread = threading.Thread(
-            target=self._playwright_worker,
-            name="PlaywrightWorker",
-            daemon=False  # 改为非守护线程，确保正确关闭
-        )
-        self._playwright_thread.start()
+    def load(self, cookies_file: str = 'cookies.txt') -> Optional[List[Dict]]:
+        """加载并预处理cookies"""
+        if not os.path.exists(cookies_file):
+            self.logger.info(f"Cookies file not found: {cookies_file}")
+            return None
 
-    def _playwright_worker(self):
-        """Playwright工作线程"""
         try:
-            self.logger.info("正在初始化Playwright工作线程...")
-            playwright = sync_playwright().start()
-            self.logger.info("Playwright初始化完成")
+            with open(cookies_file, 'r', encoding='utf-8') as f:
+                cookies = json.load(f)
 
-            # 创建浏览器池
-            browser_pool = []
-            for _ in range(self.max_browsers):
-                browser = playwright.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--disable-gpu',
-                        '--no-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-extensions',
-                        '--disable-infobars',
-                        '--disable-notifications',
-                    ]
+            processed = []
+            for c in cookies:
+                try:
+                    expiry = c.get('expiry') or c.get('expirationDate')
+                    if expiry is None:
+                        expiry = int(time.time()) + 3600
+                    elif isinstance(expiry, float):
+                        expiry = int(expiry)
+
+                    domain = c.get('domain', '.ngabbs.com')
+                    if not domain.startswith('.'):
+                        domain = f'.{domain}'
+
+                    cookie_dict = {
+                        'name': c['name'],
+                        'value': c['value'],
+                        'domain': domain,
+                        'path': c.get('path', '/'),
+                        'expires': expiry,
+                        'httpOnly': c.get('httpOnly', False),
+                        'secure': c.get('secure', False),
+                        'sameSite': 'Lax'
+                    }
+
+                    processed.append({k: v for k, v in cookie_dict.items() if v is not None})
+                except KeyError:
+                    self.logger.warning(f"Skip invalid cookie: missing required field")
+                    continue
+
+            self.cookies = processed
+            return processed
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in cookies file: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to load cookies: {e}")
+            return None
+
+    def save_if_updated(self, context):
+        """检查并保存更新后的cookies"""
+        try:
+            current_cookies = context.cookies()
+            nga_passport = next(
+                (c for c in current_cookies if c['name'] == 'ngaPassportUid'),
+                None
+            )
+
+            if nga_passport:
+                old_passport = next(
+                    (c for c in self.cookies if c['name'] == 'ngaPassportUid'),
+                    None
+                ) if self.cookies else None
+
+                needs_update = (
+                    not old_passport or
+                    old_passport['value'] != nga_passport['value'] or
+                    old_passport.get('expires', 0) != nga_passport.get('expires', 0)
                 )
 
-                # 构建context参数
-                context_kwargs = {
-                    'viewport': {'width': 1920, 'height': 1080},
-                    'java_script_enabled': True,
-                    'ignore_https_errors': True,
-                    'permissions': [],
-                    'extra_http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'Cache-Control': 'no-cache',
-                        'Pragma': 'no-cache',
-                        'Sec-Fetch-Dest': 'document',
-                        'Sec-Fetch-Mode': 'navigate',
-                        'Sec-Fetch-Site': 'none',
-                        'Sec-Fetch-User': '?1',
-                        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                        'Sec-Ch-Ua-Mobile': '?0',
-                        'Sec-Ch-Ua-Platform': '"Linux"',
-                        'Upgrade-Insecure-Requests': '1'
+                if needs_update:
+                    with open('cookies.txt', 'w', encoding='utf-8') as f:
+                        json.dump(current_cookies, f, ensure_ascii=False, indent=2)
+
+                    self.cookies = current_cookies
+                    expires_time = time.strftime(
+                        '%Y-%m-%d %H:%M:%S',
+                        time.localtime(nga_passport['expires'])
+                    )
+                    self.logger.info(
+                        f"✓ Updated ngaPassportUid: {nga_passport['value'][:20]}..., "
+                        f"expires: {expires_time}"
+                    )
+        except Exception as e:
+            self.logger.error(f"Auto-update cookies failed: {e}")
+
+
+# ========== 页面获取器 ==========
+class PageFetcher:
+    """页面获取器 - 独立职责"""
+    def __init__(self, logger):
+        self.logger = logger
+
+    def fetch(self, browser_pool: List, url: str, cookies: Optional[List],
+              browser_index: int, referer: str = 'https://bbs.nga.cn/') -> Dict:
+        """获取页面内容"""
+        browser, context = browser_pool[browser_index % len(browser_pool)]
+        page = context.new_page()
+
+        try:
+            self.logger.debug(f"Loading page: {url} (browser {browser_index})")
+
+            if cookies:
+                self.logger.debug(f"Setting {len(cookies)} cookies")
+                context.clear_cookies()
+                context.add_cookies(cookies)
+                time.sleep(0.1)
+
+            page.set_extra_http_headers({'Referer': referer})
+
+            self.logger.debug(f"Navigating to: {url}")
+            nav_start = time.time()
+            page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            nav_time = time.time() - nav_start
+            self.logger.debug(f"Navigation complete: {nav_time:.2f}s")
+
+            page.wait_for_load_state("domcontentloaded", timeout=LOAD_TIMEOUT)
+
+            return {
+                'url': page.url,
+                'content': page.content(),
+                'success': True,
+                'nav_time': nav_time
+            }
+        except Exception as e:
+            self.logger.error(f"Page load failed: {url}, error: {type(e).__name__}: {str(e)}")
+            raise
+        finally:
+            page.close()
+
+
+# ========== Playwright工作线程 ==========
+class PlaywrightWorker:
+    """Playwright专用工作线程（负责浏览器池管理）"""
+    def __init__(self, max_browsers: int, proxy_manager=None, logger=None):
+        self.max_browsers = max_browsers
+        self.proxy_manager = proxy_manager
+        self.logger = logger or self._default_logger
+        self._workers = []
+        self._task_queue = Queue()
+        self._result_map = {}
+        self._condition = threading.Condition(threading.Lock())
+        self._stop_event = threading.Event()
+        self._initialized = threading.Event()
+        self._browser_pool = []
+        self._playwright = None
+        self._start_worker()
+
+    def _default_logger(self):
+        import logging
+        return logging.getLogger('PlaywrightWorker')
+
+    def _start_worker(self):
+        """启动工作线程"""
+        worker = threading.Thread(
+            target=self._playwright_worker_loop,
+            name="PlaywrightWorker",
+            daemon=False  # 非守护线程，确保正确关闭
+        )
+        worker.start()
+        self._workers.append(worker)
+
+        # 等待初始化完成
+        self._initialized.wait(timeout=10)
+
+    def _create_browser_pool(self):
+        """在工作线程中创建浏览器池"""
+        playwright = sync_playwright().start()
+
+        for _ in range(self.max_browsers):
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=BROWSER_ARGS
+            )
+
+            context_kwargs = {
+                'viewport': DEFAULT_VIEWPORT,
+                'java_script_enabled': True,
+                'ignore_https_errors': True,
+                'permissions': [],
+                'extra_http_headers': DEFAULT_HEADERS.copy()
+            }
+
+            if self.proxy_manager:
+                proxy_dict = self.proxy_manager.get_random_proxy()
+                if proxy_dict and proxy_dict.get('proxy'):
+                    proxy_server = proxy_dict['proxy']
+                    proxy_config = {
+                        'server': proxy_server,
+                        'bypass': 'localhost;127.0.0.1;*.nga.cn;*.ngabbs.com'
                     }
-                }
 
-                # 如果启用了代理，设置代理
-                if self.proxy_manager:
-                    self.logger.debug(f"🔍 获取随机代理 (池中有 {len(self.proxy_manager.proxy_pool)} 个代理)")
-                    proxy_dict = self.proxy_manager.get_random_proxy()
-                    if proxy_dict and proxy_dict.get('proxy'):
-                        # 构建代理服务器地址
-                        proxy_server = proxy_dict['proxy']
-                        auth_info = ""
-                        if 'username' in proxy_dict and 'password' in proxy_dict:
-                            auth_info = f" (认证: {proxy_dict['username']})"
+                    if 'username' in proxy_dict and 'password' in proxy_dict:
+                        proxy_config['username'] = proxy_dict['username']
+                        proxy_config['password'] = proxy_dict['password']
 
-                        # 构建代理设置
-                        proxy_config = {
-                            'server': proxy_server,
-                            'bypass': 'localhost;127.0.0.1;*.nga.cn;*.ngabbs.com'
-                        }
+                    context_kwargs['proxy'] = proxy_config
+                    self.logger.debug(f"Using proxy: {proxy_server}")
 
-                        # 如果有认证信息，添加认证
-                        if 'username' in proxy_dict and 'password' in proxy_dict:
-                            proxy_config['username'] = proxy_dict['username']
-                            proxy_config['password'] = proxy_dict['password']
+            context = browser.new_context(**context_kwargs)
+            self._browser_pool.append((browser, context))
 
-                        context_kwargs['proxy'] = proxy_config
-                        self.logger.info(f"🌐 使用代理: {proxy_server}{auth_info}")
-                    else:
-                        self.logger.warning("⚠️ 未获取到可用代理，使用直连")
+        return playwright
 
-                context = browser.new_context(**context_kwargs)
-                browser_pool.append((browser, context))
-
-            self.logger.info(f"浏览器池初始化完成，共{len(browser_pool)}个实例")
+    def _playwright_worker_loop(self):
+        """Playwright工作线程主循环"""
+        try:
+            self.logger.info("Initializing Playwright worker...")
+            self._playwright = self._create_browser_pool()
+            self.logger.info(f"Browser pool initialized: {len(self._browser_pool)} instances")
 
             # 通知初始化完成
-            with self._init_condition:
-                self._initialized = True
-                self._init_condition.notify_all()
+            self._initialized.set()
 
             # 工作线程主循环
+            last_queue_check = time.time()
             while not self._stop_event.is_set():
                 try:
-                    # 从队列获取任务，使用较短的超时以便及时响应停止信号
-                    request_id, task_func, args, kwargs, result_event = self._request_queue.get(timeout=0.1)
+                    request_id, task_func, args, kwargs, result_event = \
+                        self._task_queue.get(timeout=0.1)
 
-                    # 检查停止事件（避免在执行任务时被阻塞）
                     if self._stop_event.is_set():
-                        # 处理队列中剩余的任务
                         if result_event:
                             result_event.set()
                         break
 
-                    # 执行任务
+                    # 【诊断日志】记录任务队列状态
+                    current_time = time.time()
+                    if current_time - last_queue_check > 10:  # 每10秒记录一次
+                        queue_size = self._task_queue.qsize()
+                        self.logger.info(f"📊 [工作线程诊断] 任务队列大小: {queue_size}")
+                        last_queue_check = current_time
+
+                    task_start = time.time()
                     try:
-                        result = task_func(browser_pool, *args, **kwargs)
+                        # 在工作线程中执行任务
+                        task_name = getattr(task_func, '__name__', 'unknown_task')
+                        self.logger.debug(f"🔄 [工作线程] 开始执行任务: {task_name}")
+                        
+                        result = task_func(self._browser_pool, *args, **kwargs)
+                        
+                        task_duration = time.time() - task_start
+                        self.logger.debug(f"✅ [工作线程] 任务完成: {task_name}, 耗时: {task_duration:.2f}s")
+                        
                         with self._condition:
                             self._result_map[request_id] = ('success', result, None)
                     except Exception as e:
-                        # 保存异常对象及其类型信息
+                        task_duration = time.time() - task_start
+                        self.logger.error(f"❌ [工作线程] 任务失败: {task_name}, 耗时: {task_duration:.2f}s, 错误: {e}")
                         import traceback
                         with self._condition:
                             self._result_map[request_id] = ('error', None, (type(e), e, traceback.format_exc()))
@@ -218,175 +370,129 @@ class BrowserPool:
                         with self._condition:
                             self._condition.notify_all()
 
-                    # 通知任务完成
-                    result_event.set()
-
+                    if result_event:
+                        result_event.set()
                 except Empty:
-                    # 空队列，检查停止事件
                     continue
                 except Exception as e:
-                    self.logger.error(f"工作线程处理任务时出错: {str(e)}")
-
-            # 处理队列中的剩余任务（快速清理）
-            remaining_tasks = []
-            while True:
-                try:
-                    request_id, task_func, args, kwargs, result_event = self._request_queue.get_nowait()
-                    remaining_tasks.append((request_id, result_event))
-                except Empty:
-                    break
-
-            # 标记这些任务为已取消
-            for request_id, result_event in remaining_tasks:
-                with self._condition:
-                    self._result_map[request_id] = ('canceled', None, '任务被取消')
-                self._condition.notify_all()
-                if result_event:
-                    result_event.set()
+                    self.logger.error(f"Worker error: {e}")
 
             # 清理资源
-            self.logger.info("正在关闭浏览器实例...")
-            for browser, context in browser_pool:
+            self.logger.info("Closing browser instances...")
+            for browser, context in self._browser_pool:
                 try:
                     context.close()
                     browser.close()
                 except Exception as e:
-                    self.logger.warning(f"关闭资源时出错: {str(e)}")
+                    self.logger.warning(f"Error closing browser: {e}")
 
-            playwright.stop()
-            self.logger.info("Playwright工作线程已退出")
+            if self._playwright:
+                self._playwright.stop()
+
+            self.logger.info("Playwright worker stopped")
 
         except Exception as e:
-            self.logger.error(f"Playwright工作线程初始化失败: {str(e)}")
-            with self._init_condition:
-                self._initialized = True
-                self._init_condition.notify_all()
+            self.logger.error(f"Playwright worker failed: {e}")
+            self._initialized.set()  # 确保通知等待者
+            raise
 
-    def _execute_in_playwright_thread(self, task_func, *args, **kwargs):
-        """在Playwright工作线程中执行任务"""
-        # 检查是否已收到停止信号
+    def execute(self, task_func: Callable, *args, **kwargs):
+        """在工作线程中执行任务"""
         if self._stop_event.is_set():
-            self.logger.warning("⚠️ 浏览器池正在关闭，任务被中断")
-            raise InterruptedError("浏览器池正在关闭，任务被中断")
+            raise InterruptedError("Playwright worker is shutting down")
 
         request_id = str(uuid.uuid4())
         result_event = threading.Event()
         task_name = getattr(task_func, '__name__', str(task_func))
 
-        self.logger.debug(f"📥 接收任务: {task_name} (ID: {request_id})")
-
         with self._condition:
             self._result_map[request_id] = None
 
-        # 添加任务到队列
-        self._request_queue.put((request_id, task_func, args, kwargs, result_event))
-        self.logger.debug(f"✅ 任务已添加到队列: {task_name} (ID: {request_id})")
+        self._task_queue.put((request_id, task_func, args, kwargs, result_event))
+        self.logger.debug(f"Task queued: {task_name}")
 
-        # 等待结果，使用较短的超时并检查停止事件
-        timeout = 60
-        wait_interval = 0.5  # 分段等待以便及时响应停止信号
-        elapsed = 0
-
-        while elapsed < timeout:
-            # 检查停止事件
-            if self._stop_event.is_set():
-                self.logger.warning(f"⚠️ 任务执行期间收到停止信号，取消任务: {task_name} (ID: {request_id})")
-                with self._condition:
-                    self._result_map.pop(request_id, None)
-                raise InterruptedError("浏览器池正在关闭，任务被中断")
-
-            # 等待一小段时间
-            if result_event.wait(timeout=wait_interval):
-                break
-            elapsed += wait_interval
-
-            # 每10秒输出一次等待日志
-            if elapsed > 0 and elapsed % 10 == 0:
-                self.logger.debug(f"⏳ 任务仍在执行中: {task_name} (ID: {request_id})，已等待 {elapsed:.0f}s")
+        # 等待结果
+        if not result_event.wait(timeout=REQUEST_TIMEOUT):
+            with self._condition:
+                self._result_map.pop(request_id, None)
+            raise TimeoutError(f"Task timeout: {task_name}")
 
         with self._condition:
             status, result, error = self._result_map.pop(request_id, ('timeout', None, 'Timeout'))
 
             if status == 'success':
-                self.logger.debug(f"✅ 任务执行成功: {task_name} (ID: {request_id})，耗时 {elapsed:.2f}s")
+                self.logger.debug(f"Task completed: {task_name}")
                 return result
-            elif status == 'canceled':
-                self.logger.warning(f"❌ 任务被取消: {task_name} (ID: {request_id})")
-                raise InterruptedError("任务被取消")
             elif status == 'error':
-                # 重新抛出原始异常（保持异常类型）
-                exc_type, exc_value, exc_traceback = error
-                self.logger.error(f"❌ 任务执行失败: {task_name} (ID: {request_id})，错误: {exc_type.__name__}: {exc_value}")
+                exc_type, exc_value, _ = error
+                self.logger.error(f"Task failed: {task_name}, {exc_type.__name__}: {exc_value}")
                 raise exc_type(exc_value)
             else:
-                self.logger.error(f"⏰ 任务执行超时: {task_name} (ID: {request_id})，超时时间 {timeout}s")
-                raise TimeoutError('任务执行超时')
+                self.logger.error(f"Task timeout: {task_name}")
+                raise TimeoutError(f"Task timeout: {task_name}")
 
-    def execute(self, task_func, *args, **kwargs):
-        """执行一个Playwright操作"""
-        return self._execute_in_playwright_thread(task_func, *args, **kwargs)
-
-    def log_pool_status(self):
-        """记录当前连接池状态"""
-        stats = self.stats.get_stats()
-        status_report = "\n".join([f"{k}: {v}" for k, v in stats.items()])
-        self.logger.info(f"性能统计报告:\n{status_report}")
-
-    def close(self, force=False):
-        """关闭所有资源
-
-        Args:
-            force: 是否强制立即关闭（用于信号处理）
-        """
-        self.logger.info("正在关闭浏览器池...")
-
-        # 发送停止信号
+    def shutdown(self, timeout: int = 10):
+        """关闭工作线程"""
+        self.logger.info("Shutting down Playwright worker...")
         self._stop_event.set()
 
-        if self._playwright_thread and self._playwright_thread.is_alive():
-            # 增加超时时间以确保优雅关闭
-            timeout = 5 if force else 30
-            self.logger.info(f"等待工作线程结束，超时时间: {timeout}秒...")
+        for worker in self._workers:
+            worker.join(timeout=timeout)
 
-            # 发送SIGINT到工作线程以加速关闭
-            if force and hasattr(signal, 'pthread_sigmask'):
-                try:
-                    # 尝试中断队列等待
-                    import ctypes
-                    ctypes.pythonapi.PyThread_set_thread_name(
-                        self._playwright_thread.ident, "PlaywrightWorker"
-                    )
-                except:
-                    pass
+        self.logger.info("Playwright worker stopped")
 
-            self._playwright_thread.join(timeout=timeout)
 
-            # 检查线程是否仍在运行
-            if self._playwright_thread.is_alive():
-                self.logger.warning("工作线程未能在超时时间内结束，强制关闭")
-                # 强制关闭浏览器实例
-                # 注意：由于浏览器实例在工作线程中，这里只能记录警告
+# ========== 浏览器池 ==========
+class BrowserPool:
+    """浏览器连接池（使用PlaywrightWorker）"""
+    def __init__(self, max_browsers: int = 4, proxy_manager=None, logger=None):
+        self.max_browsers = max_browsers
+        self.proxy_manager = proxy_manager
+        self.logger = logger or self._default_logger
+        self.stats = PerformanceStats()
+        self._page_fetcher = PageFetcher(self.logger)
+        self._playwright_worker = PlaywrightWorker(max_browsers, proxy_manager, logger)
 
+    def _default_logger(self):
+        import logging
+        return logging.getLogger('BrowserPool')
+
+    def fetch_page(self, url: str, cookies: Optional[List],
+                   browser_index: int) -> Dict:
+        """获取页面"""
+        def _fetch_task(browser_pool):
+            return self._page_fetcher.fetch(browser_pool, url, cookies, browser_index)
+
+        return self._playwright_worker.execute(_fetch_task)
+
+    def log_pool_status(self):
+        """记录连接池状态"""
+        stats = self.stats.get_stats()
+        report = "\n".join([f"{k}: {v}" for k, v in stats.items()])
+        self.logger.info(f"Performance stats:\n{report}")
+
+    def close(self):
+        """关闭浏览器池"""
+        self.logger.info("Closing browser pool...")
+        self._playwright_worker.shutdown()
         self.log_pool_status()
-        self.logger.info("浏览器池已关闭")
+        self.logger.info("Browser pool closed")
 
 
+# ========== Playwright中间件 ==========
 class PlaywrightMiddleware:
+    """优化的Playwright中间件"""
     def __init__(self):
         self.browser_pool = None
         self.logger = None
-        self.cookies = None
+        self.cookie_manager = None
         self.proxy_manager = None
-        self.last_stat_time = time.time()
-        self._browser_index = 0  # 用于轮询选择浏览器实例
-
-        # 新增：封禁检测和实例管理
         self.ban_detector = None
         self.instance_manager = None
-
-        # 记录近期失败的浏览器实例，避免重复使用有问题的实例（保留作为备用）
-        self._failed_browsers = {}  # {browser_index: failure_time}
-        self._lock = threading.Lock()  # 线程锁保护_failed_browsers
+        self.last_stat_time = time.time()
+        self._browser_index = 0
+        self._failed_browsers = {}
+        self._lock = threading.Lock()
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -399,512 +505,251 @@ class PlaywrightMiddleware:
         return middleware
 
     def spider_opened(self, spider):
-        """Spider启动时的处理"""
+        """Spider启动处理"""
         self.logger = spider.logger
         self.logger.info("=" * 60)
-        self.logger.info("🚀 Playwright中间件已启动，信号处理器已注册")
+        self.logger.info("Playwright middleware starting")
         self.logger.info("=" * 60)
 
-        # 初始化封禁检测器和实例管理器
+        # 初始化Cookie管理器
+        self.cookie_manager = CookieManager(self.logger)
+        self.cookie_manager.load()
+
+        # 初始化封禁检测器
         self.ban_detector = BanDetector(
             logger=self.logger,
             ban_threshold=spider.settings.getint('BAN_THRESHOLD', 3),
             recovery_time=spider.settings.getint('BAN_RECOVERY_TIME', 1800)
         )
 
-        # 定义实例替换回调函数
-        def replace_browser_instance(failed_instance_id: int) -> int:
-            """替换失败的浏览器实例"""
-            return self._replace_browser_instance(failed_instance_id)
+        # 初始化实例管理器
+        def replace_instance(failed_id: int) -> int:
+            return self._replace_browser_instance(failed_id)
 
         self.instance_manager = BrowserInstanceManager(
             max_instances=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
             ban_detector=self.ban_detector,
-            replacement_callback=replace_browser_instance,
+            replacement_callback=replace_instance,
             proxy_manager=self.proxy_manager,
             logger=self.logger
         )
 
-        # 启动实例管理器
         self.instance_manager.start()
-        self.logger.info("✅ 封禁检测和实例管理器已启动")
+        self.logger.info("Ban detection and instance manager started")
 
-        # 检查是否启用代理
+        # 初始化代理（如果启用）
         proxy_enabled = spider.settings.getbool('PROXY_ENABLED', False)
-        self.logger.info(f"🔍 检查代理设置: PROXY_ENABLED = {proxy_enabled}")
-
         if proxy_enabled:
-            try:
-                self.logger.info("🔧 正在初始化代理管理器...")
-                self.proxy_manager = get_proxy_manager()
-                self.logger.info("✅ 代理管理器已初始化")
-
-                # 获取初始代理列表
-                self.logger.info("🔄 正在获取初始代理列表...")
-                proxies = self.proxy_manager.get_proxies(force_refresh=True)
-
-                if proxies:
-                    self.logger.info(f"✅ 成功加载 {len(proxies)} 个代理")
-                    self.logger.info(f"📋 代理列表: {', '.join(proxies[:5])}")
-                    if len(proxies) > 5:
-                        self.logger.info(f"   ... 等共 {len(proxies)} 个代理")
-                else:
-                    self.logger.warning("⚠️ 未获取到任何代理")
-
-                # 显示代理池状态
-                status = self.proxy_manager.get_pool_status()
-                self.logger.info("📊 代理池初始状态:")
-                for key, value in status.items():
-                    self.logger.info(f"   - {key}: {value}")
-
-                self.logger.info("=" * 60)
-
-            except FileNotFoundError as e:
-                self.logger.error("=" * 60)
-                self.logger.error(f"❌ 代理配置文件错误: {e}")
-                self.logger.error("请确保 proxy_config.json 文件存在且配置正确")
-                self.logger.error("=" * 60)
-                self.proxy_manager = None
-
-            except ValueError as e:
-                self.logger.error("=" * 60)
-                self.logger.error(f"❌ 代理配置验证错误: {e}")
-                self.logger.error("请检查配置文件中的 trade_no 和 api_key 是否正确")
-                self.logger.error("=" * 60)
-                self.proxy_manager = None
-
-            except Exception as e:
-                self.logger.error("=" * 60)
-                self.logger.error(f"❌ 代理管理器初始化失败: {str(e)}")
-                self.logger.error(f"错误类型: {type(e).__name__}")
-                self.logger.error("=" * 60)
-                self.proxy_manager = None
+            self._init_proxy(spider)
         else:
-            self.logger.info("ℹ️  代理未启用 (PROXY_ENABLED = False)")
-            self.logger.info("=" * 60)
+            self.logger.info("Proxy disabled")
+
+        self.logger.info("=" * 60)
+
+    def _init_proxy(self, spider):
+        """初始化代理管理器"""
+        try:
+            self.logger.info("Initializing proxy manager...")
+            self.proxy_manager = get_proxy_manager()
+            proxies = self.proxy_manager.get_proxies(force_refresh=True)
+
+            if proxies:
+                self.logger.info(f"Loaded {len(proxies)} proxies")
+            else:
+                self.logger.warning("No proxies loaded")
+
+            status = self.proxy_manager.get_pool_status()
+            self.logger.info("Proxy pool status:")
+            for key, value in status.items():
+                self.logger.info(f"  - {key}: {value}")
+        except FileNotFoundError:
+            self.logger.error("Proxy config file not found")
+            self.proxy_manager = None
+        except ValueError as e:
+            self.logger.error(f"Proxy config validation error: {e}")
+            self.proxy_manager = None
+        except Exception as e:
+            self.logger.error(f"Proxy manager init failed: {e}")
+            self.proxy_manager = None
 
     def spider_closed(self, spider, reason):
-        """Spider关闭时的处理"""
-        self.logger.info(f"Spider关闭原因: {reason}")
+        """Spider关闭处理"""
+        self.logger.info(f"Spider closed: {reason}")
 
-        # 关闭实例管理器
         if self.instance_manager:
-            self.logger.info("正在关闭实例管理器...")
             self.instance_manager.stop()
 
         if self.browser_pool:
-            self.logger.info("正在通过信号处理器关闭浏览器池...")
             self.browser_pool.close()
 
-
-    def _load_cookies(self) -> None:
-        """
-        预加载cookies（带性能监控和错误处理）
-        功能特性：
-        1. 文件存在性检查
-        2. JSON格式验证
-        3. 字段兼容性处理
-        4. 性能监控
-        5. 详细的错误处理
-        """
-        start_time = time.time()
-        cookies_file = 'cookies.txt'
-        
-        # 1. 文件检查
-        if not os.path.exists(cookies_file):
-            self.logger.info(f"Cookies文件未找到: {cookies_file}")
-        
-        try:
-            # 2. 文件读取和JSON解析
-            with open(cookies_file, 'r', encoding='utf-8') as f:
-                cookies = json.load(f)
-            
-            # 3. 性能监控点
-            parse_time = time.time()
-            
-            # 4. Cookies转换处理
-            processed_cookies = []
-            for c in cookies:
-                try:
-                    # 处理expiry/expirationDate字段
-                    expiry = c.get('expiry') or c.get('expirationDate')
-                    if expiry is None:
-                        expiry = int(time.time()) + 3600  # 默认1小时过期
-                    elif isinstance(expiry, float):
-                        expiry = int(expiry)
-                    
-                    # 处理domain字段
-                    domain = c.get('domain', '.ngabbs.com')
-                    if not domain.startswith('.'):
-                        domain = f'.{domain}'
-                    
-                    # 构建标准cookie字典
-                    cookie_dict = {
-                        'name': c['name'],
-                        'value': c['value'],
-                        'domain': domain,
-                        'path': c.get('path', '/'),
-                        'expires': expiry,
-                        'httpOnly': c.get('httpOnly', False),
-                        'secure': c.get('secure', False),
-                        'sameSite': 'Lax'
-                    }
-                    
-                    # 移除None值
-                    cookie_dict = {k: v for k, v in cookie_dict.items() if v is not None}
-                    processed_cookies.append(cookie_dict)
-                
-                except KeyError as e:
-                    self.logger.info(f"[警告] 忽略无效cookie条目，缺少必要字段: {e}")
-                    continue
-            
-            # 5. 设置处理后的cookies
-            self.cookies = processed_cookies
-            
-            
-        except json.JSONDecodeError as e:
-            self.logger.info(f"Cookies文件JSON格式错误: {e}")
-        except Exception as e:
-            self.logger.info(f"加载cookies时发生未知错误: {e}")
-
-    def _save_cookies_if_updated(self, context):
-        """
-        检查并保存更新后的cookies
-        这个方法会在每次成功访问页面后被调用，自动更新ngaPassportUid等cookies
-        """
-        try:
-            # 从当前context获取所有cookies
-            current_cookies = context.cookies()
-
-            # 查找ngaPassportUid（短效cookie）
-            nga_passport = next(
-                (c for c in current_cookies if c['name'] == 'ngaPassportUid'),
-                None
-            )
-
-            if nga_passport:
-                # 查找旧的ngaPassportUid
-                old_nga_passport = next(
-                    (c for c in self.cookies if c['name'] == 'ngaPassportUid'),
-                    None
-                )
-
-                # 如果旧的不存在，或值/过期时间不同，则需要更新
-                needs_update = (
-                    not old_nga_passport or
-                    old_nga_passport['value'] != nga_passport['value'] or
-                    old_nga_passport.get('expires', 0) != nga_passport.get('expires', 0)
-                )
-
-                if needs_update:
-                    # 保存所有cookies到文件
-                    with open('cookies.txt', 'w', encoding='utf-8') as f:
-                        json.dump(current_cookies, f, ensure_ascii=False, indent=2)
-
-                    # 更新内存中的cookies缓存
-                    self.cookies = current_cookies
-
-                    # 记录日志
-                    expires_time = time.strftime(
-                        '%Y-%m-%d %H:%M:%S',
-                        time.localtime(nga_passport['expires'])
-                    )
-                    self.logger.info(
-                        f"✓ 已自动更新 ngaPassportUid - "
-                        f"新值: {nga_passport['value'][:20]}..., "
-                        f"过期时间: {expires_time}"
-                    )
-
-        except Exception as e:
-            self.logger.error(f"自动更新cookies失败: {e}")
-
     def process_request(self, request, spider):
-        if not self.logger:
-            self.logger = spider.logger
+        """处理请求"""
+        self.logger = spider.logger
 
-        if not self.cookies:
-            self._load_cookies()
+        # 【新增调试】记录每个被调用的请求
+        if 'read.php' in request.url:
+            self.logger.debug(f"🔍 [Middleware] 收到请求: {request.url}, Priority: {request.priority}")
+            # 【诊断日志】检查调度队列状态
+            if hasattr(spider.crawler.engine, 'scheduler') and hasattr(spider.crawler.engine.scheduler, 'queue'):
+                queue_size = len(spider.crawler.engine.scheduler.queue)
+                self.logger.info(f"📊 [队列诊断] 当前调度队列长度: {queue_size}")
 
-        if not self.browser_pool:
-            self.browser_pool = BrowserPool(
-                max_browsers=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
-                spider_logger=spider.logger,
-                proxy_manager=self.proxy_manager
-            )
-
-        # 每小时输出一次统计报告
-        if time.time() - self.last_stat_time > 3600:
-            self.browser_pool.log_pool_status()
-            # 输出封禁检测报告
+        # 统计报告
+        if time.time() - self.last_stat_time > 300:
+            if self.browser_pool:
+                self.browser_pool.log_pool_status()
             if self.instance_manager:
                 self.logger.info(self.instance_manager.get_status_report())
             self.last_stat_time = time.time()
 
+        # 跳过图片请求
         if 'jpg' in request.url:
             return None
 
         try:
-            # 定义浏览器任务函数
-            def _fetch_page(browser_pool, url, cookies, browser_index):
-                browser, context = browser_pool[browser_index % len(browser_pool)]
-                page = context.new_page()
+            # 确保浏览器池已初始化
+            if not self.browser_pool:
+                self.browser_pool = BrowserPool(
+                    max_browsers=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
+                    proxy_manager=self.proxy_manager,
+                    logger=self.logger
+                )
 
+            # 获取可用浏览器实例
+            browser_index = self._select_browser_instance()
+            if browser_index is None:
+                self.logger.error("No available browser instances")
+                return None
+
+            # 尝试获取页面（最多3次）
+            for attempt in range(3):
                 try:
-                    self.logger.debug(f"🌐 准备加载页面: {url} (使用浏览器 {browser_index % len(browser_pool)})")
-
-                    if cookies:
-                        self.logger.debug(f"🍪 设置 Cookies，共 {len(cookies)} 个")
-                        # 先清除旧的 cookies
-                        context.clear_cookies()
-                        # 添加新的 cookies
-                        context.add_cookies(cookies)
-                        # 等待一小段时间确保 cookies 设置完成
-                        time.sleep(0.1)
-
-                    # 设置 Referer 头部，模拟从首页跳转
-                    self.logger.debug(f"📋 设置 Referer 头部")
-                    page.set_extra_http_headers({
-                        'Referer': 'https://bbs.nga.cn/'
-                    })
-
-                    self.logger.debug(f"🚀 开始导航到页面...")
-                    nav_start = time.time()
-                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                    nav_time = time.time() - nav_start
-                    self.logger.debug(f"✅ 页面导航完成，耗时: {nav_time:.2f}s，URL: {page.url}")
-
-                    alert_start = time.time()
-                    self._handle_alert(page)
-                    alert_time = time.time() - alert_start
-
-                    load_start = time.time()
-                    page.wait_for_load_state("domcontentloaded", timeout=5000)
-                    load_time = time.time() - load_start
-                    self.logger.debug(f"⏱️ 页面加载完成: nav={nav_time:.2f}s, alert={alert_time:.2f}s, wait={load_time:.2f}s")
-
-                    # 【关键改进】在返回前自动更新cookies
-                    self.logger.debug(f"💾 更新 Cookies...")
-                    self._save_cookies_if_updated(context)
-
-                    self.logger.debug(f"📄 页面内容获取完成，字节数: {len(page.content())}")
-
-                    return {
-                        'url': page.url,
-                        'content': page.content(),
-                        'success': True
-                    }
-                except Exception as e:
-                    self.logger.error(f"❌ 页面加载失败: {url}，错误: {type(e).__name__}: {str(e)}")
-                    raise
-                finally:
-                    self.logger.debug(f"🔒 关闭页面实例")
-                    page.close()
-
-            # 获取当前可用的浏览器池大小
-            pool_size = self.browser_pool.max_browsers
-
-            # 优先使用实例管理器选择可用实例
-            selected_instance_id = None
-            if self.instance_manager:
-                selected_instance_id = self.instance_manager.get_available_instance_id()
-                if selected_instance_id is not None:
-                    # 注册实例到封禁检测器（如果还未注册）
-                    if selected_instance_id not in self.ban_detector.browser_instances:
-                        proxy_address = None
-                        if self.proxy_manager:
-                            try:
-                                proxy_dict = self.proxy_manager.get_random_proxy()
-                                proxy_address = proxy_dict.get('proxy') if proxy_dict else None
-                            except:
-                                pass
-                        self.instance_manager.register_instance(selected_instance_id, proxy_address)
-
-            # 设置尝试次数和选择策略
-            max_browser_attempts = min(3, pool_size)  # 最多尝试3个实例
-            last_exception = None
-            attempted_browsers = []
-
-            for attempt in range(max_browser_attempts):
-                # 选择浏览器实例
-                if attempt == 0 and selected_instance_id is not None:
-                    # 第一次尝试使用管理器推荐的实例
-                    browser_index = selected_instance_id
-                else:
-                    # 后续尝试使用轮询（确保ID在有效范围内）
-                    browser_index = self._browser_index % pool_size
-                    self._browser_index += 1
-
-                # 确保实例已注册到BanDetector
-                if self.instance_manager and browser_index not in self.ban_detector.browser_instances:
-                    proxy_address = None
-                    if self.proxy_manager:
-                        try:
-                            proxy_dict = self.proxy_manager.get_random_proxy()
-                            proxy_address = proxy_dict.get('proxy') if proxy_dict else None
-                        except:
-                            pass
-                    self.instance_manager.register_instance(browser_index, proxy_address)
-                    self.logger.debug(f"注册浏览器实例: {browser_index}")
-
-                # 检查实例是否被封禁
-                if self.instance_manager and self.ban_detector.is_instance_banned(browser_index):
-                    self.logger.debug(f"⏭️ 跳过被封禁的浏览器实例 {browser_index}")
-                    continue
-
-                # 检查该实例是否在旧的黑名单中（5分钟内失败的实例）- 保留作为备用
-                with self._lock:
-                    if browser_index in self._failed_browsers:
-                        failure_time = self._failed_browsers[browser_index]
-                        if time.time() - failure_time < 300:  # 5分钟内的失败记录
-                            self.logger.debug(f"⏭️ 跳过黑名单中的浏览器实例 {browser_index} (5分钟内失败过)")
-                            continue
-                        else:
-                            # 过期记录，清除它
-                            del self._failed_browsers[browser_index]
-
-                # 尝试当前浏览器实例
-                attempted_browsers.append(browser_index)
-                self.logger.debug(f"🌐 尝试浏览器实例 {attempt + 1}/{max_browser_attempts}: {browser_index} (URL: {request.url[:80]}...)")
-
-                try:
-                    # 在Playwright工作线程中执行页面获取
+                    # 【诊断日志】记录页面获取开始
+                    self.logger.info(f"🚀 [页面获取] 开始获取页面: {request.url[:80]}... (浏览器实例: {browser_index}, 尝试: {attempt + 1}/3)")
+                    
                     start_time = time.time()
-                    result = self.browser_pool.execute(
-                        _fetch_page,
-                        request.url,
-                        self.cookies,
-                        browser_index
+                    result = self.browser_pool.fetch_page(
+                        request.url, self.cookie_manager.cookies, browser_index
                     )
                     response_time = time.time() - start_time
 
-                    # 成功！报告成功给实例管理器
+                    # 记录成功
+                    self.browser_pool.stats.log_request(True, response_time)
                     if self.instance_manager:
                         self.instance_manager.report_success(browser_index, response_time)
 
-                    # 清除该实例的旧失败记录（如果存在）
-                    with self._lock:
-                        if browser_index in self._failed_browsers:
-                            del self._failed_browsers[browser_index]
-
-                    self.browser_pool.stats.log_request(True, 1.0)
-                    self.logger.debug(f"✅ 浏览器实例 {browser_index} 成功获取页面 (耗时: {response_time:.2f}s)")
+                    self.logger.info(f"✅ [页面获取成功] {request.url[:80]}... ({response_time:.2f}s)")
 
                     return scrapy.http.HtmlResponse(
                         url=result['url'],
                         body=result['content'].encode('utf-8'),
                         encoding='utf-8',
-                        request=request
+                        request=request,
+                        status=200  # 明确设置状态码
                     )
-                except (PlaywrightTimeoutError, Exception) as e:
-                    last_exception = e
 
-                    # 报告失败给实例管理器
+                except (PlaywrightTimeoutError, Exception) as e:
+                    error_type = type(e).__name__
+
+                    # 报告失败
                     is_banned = False
                     if self.instance_manager:
                         is_banned = self.instance_manager.report_failure(browser_index, e)
 
-                    # 记录失败的浏览器实例（旧系统，保留作为备用）
                     with self._lock:
                         self._failed_browsers[browser_index] = time.time()
 
-                    error_type = type(e).__name__
-                    self.logger.warning(f"⚠️ 浏览器实例 {browser_index} 失败 ({error_type}): {str(e)[:100]}...")
+                    self.logger.warning(
+                        f"Browser {browser_index} failed (attempt {attempt + 1}/3): "
+                        f"{error_type}: {str(e)[:100]}..."
+                    )
 
-                    # 如果实例被封禁，记录特殊信息
                     if is_banned:
-                        self.logger.warning(f"🚫 实例 {browser_index} 已被标记为封禁，将自动替换")
+                        self.logger.warning(f"Browser {browser_index} banned, will be replaced")
 
-                    # 如果是最后一次尝试，抛出异常
-                    if attempt == max_browser_attempts - 1:
-                        self.logger.error(f"❌ 所有 {max_browser_attempts} 个浏览器实例都失败，放弃重试")
-                        raise e
-                    else:
-                        # 继续尝试下一个实例
-                        self.logger.debug(f"🔄 准备尝试下一个浏览器实例...")
-                        continue
+                    # 选择下一个实例
+                    browser_index = self._select_browser_instance()
+                    if browser_index is None:
+                        break
 
-            # 如果到达这里，说明所有实例都失败了
-            # 这里不应该执行到，因为上面的循环会在最后一次尝试时抛出异常
-            if last_exception:
-                raise last_exception
-        except PlaywrightTimeoutError as e:
-            # 检查是否是"所有浏览器实例都失败"导致的超时
-            # 在这种情况下，不应该返回408，因为我们已经尝试了多个实例
-            # 而是应该记录为最终的失败
+                    # 尝试下一个实例
+                    continue
 
-            # 查看最近是否尝试了多个浏览器实例
-            # 如果是，说明这是最终失败，不是单实例超时
+            # 所有尝试都失败
             self.browser_pool.stats.log_timeout()
-            # 每100次超时输出一次统计
-            if self.browser_pool.stats.timeout_errors % 100 == 0:
-                self.browser_pool.log_pool_status()
-
-            # 如果是一个浏览器实例失败，可能是暂时性问题，返回408让Scrapy重试
-            # 但我们已经改用多实例重试，所以这里主要是兜底处理
-            spider.logger.debug(f"⏰ 单实例超时，转换为408状态码进行重试: {request.url[:80]}...")
-            # 返回 408 状态码，让 RetryMiddleware 自动重试
             return scrapy.http.Response(
                 url=request.url,
-                status=408,  # Request Timeout
+                status=408,
                 body=b'',
-                headers={'Retry-After': '30'}  # 建议 30 秒后重试
+                headers={'Retry-After': '30'}
             )
+
         except Exception as e:
-            # 其他错误，记录日志
-            spider.logger.warning(f"Playwright请求处理失败（非超时）: {str(e)}")
-            self.browser_pool.stats.log_request(False, 0)
+            self.logger.error(f"Request processing failed: {e}")
             return None
 
-    def _handle_alert(self, page):
-        """处理弹窗（带性能监控）"""
-        def handle_dialog(dialog):
-            start_time = time.time()
-            dialog.accept()
-            self.logger.debug(f"弹窗处理耗时: {time.time() - start_time:.4f}s - {dialog.message[:50]}...")
-        
-        page.on('dialog', handle_dialog)
+    def _select_browser_instance(self) -> Optional[int]:
+        """选择可用的浏览器实例"""
+        pool_size = self.browser_pool.max_browsers if self.browser_pool else 1
+
+        # 首先尝试使用实例管理器推荐的实例
+        if self.instance_manager:
+            selected = self.instance_manager.get_available_instance_id()
+            if selected is not None and selected not in self.ban_detector.browser_instances:
+                proxy_addr = None
+                if self.proxy_manager:
+                    try:
+                        proxy_dict = self.proxy_manager.get_random_proxy()
+                        proxy_addr = proxy_dict.get('proxy') if proxy_dict else None
+                    except:
+                        pass
+                self.instance_manager.register_instance(selected, proxy_addr)
+
+                if not self.ban_detector.is_instance_banned(selected):
+                    # 检查失败黑名单
+                    with self._lock:
+                        if selected not in self._failed_browsers or \
+                           time.time() - self._failed_browsers[selected] >= 300:
+                            return selected
+
+        # 轮询选择
+        for _ in range(pool_size):
+            idx = self._browser_index % pool_size
+            self._browser_index += 1
+
+            # 检查封禁状态
+            if self.ban_detector.is_instance_banned(idx):
+                continue
+
+            # 检查失败黑名单
+            with self._lock:
+                if idx in self._failed_browsers:
+                    if time.time() - self._failed_browsers[idx] < 300:
+                        continue
+                    else:
+                        del self._failed_browsers[idx]
+
+            # 注册实例
+            if self.instance_manager and idx not in self.ban_detector.browser_instances:
+                proxy_addr = None
+                if self.proxy_manager:
+                    try:
+                        proxy_dict = self.proxy_manager.get_random_proxy()
+                        proxy_addr = proxy_dict.get('proxy') if proxy_dict else None
+                    except:
+                        pass
+                self.instance_manager.register_instance(idx, proxy_addr)
+
+            return idx
+
+        return None
 
     def _replace_browser_instance(self, failed_instance_id: int) -> Optional[int]:
-        """
-        替换失败的浏览器实例
-
-        Args:
-            failed_instance_id: 失败的实例ID
-
-        Returns:
-            Optional[int]: 新实例的ID，如果替换失败则返回None
-        """
-        try:
-            self.logger.info(f"🔧 开始替换浏览器实例 {failed_instance_id}")
-
-            # 由于当前架构限制，我们无法真正创建新的浏览器实例
-            # 这里采用重启整个浏览器池的变通方案
-            if self.browser_pool:
-                # 获取新的实例ID（简单的递增）
-                new_instance_id = (failed_instance_id + 1000) % 10000  # 避免ID冲突
-
-                self.logger.warning(
-                    f"⚠️ 由于架构限制，将重启浏览器池来替换实例 {failed_instance_id} "
-                    f"新实例ID: {new_instance_id}"
-                )
-
-                # 记录重启前的统计信息
-                old_stats = self.browser_pool.stats.get_stats()
-                self.logger.info(f"重启前统计: {old_stats}")
-
-                # 这里实际无法重启单个实例，只能标记使用新的ID
-                # 在实际使用中，当检测到被封禁时，会自动切换到其他可用实例
-                # 真正的"替换"是实例管理器调度其他实例来承担工作
-
-                return new_instance_id
-
-            return None
-
-        except Exception as e:
-            self.logger.error(f"替换浏览器实例时出错: {e}")
-            return None
+        """替换失败的浏览器实例"""
+        self.logger.info(f"Replacing browser instance {failed_instance_id}")
+        return (failed_instance_id + 1000) % 10000
 
     def close_spider(self, spider):
+        """关闭Spider"""
         if self.browser_pool:
             self.browser_pool.close()
-
