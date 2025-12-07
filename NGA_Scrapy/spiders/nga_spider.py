@@ -221,16 +221,47 @@ class NgaSpider(scrapy.Spider):
         """两阶段主题列表解析：阶段1-收集所有主题信息"""
         # 解析主题列表
         page = response.meta.get('page', 'unknown')
-        self.logger.debug(f"📝 开始解析第 {page} 页主题列表 (URL: {response.url})")
+        self.logger.info(f"📝 开始解析第 {page} 页主题列表 (URL: {response.url})")
 
+        # 🔍 [DEBUG] 添加详细的页面信息
+        content_length = len(response.text)
+        self.logger.info(f"🔍 [DEBUG] 页面内容长度: {content_length} 字符")
+
+        # 保存页面HTML用于调试
+        self._save_response_html(response, page, content_length)
+
+        # 检查页面是否包含NGA内容
+        if 'nga' not in response.text.lower() and 'bbs.nga.cn' not in response.url:
+            self.logger.error(f"❌ [DEBUG] 页面可能不是NGA内容，保存HTML文件用于调试")
+            self._save_response_html(response, page, content_length, reason="not_nga_content")
+
+        # 检查是否有反爬虫提示
+        anti_bot_keywords = ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证', '您的访问异常']
+        if any(keyword in response.text for keyword in anti_bot_keywords):
+            self.logger.error(f"❌ [DEBUG] 检测到反爬虫提示: {[kw for kw in anti_bot_keywords if kw in response.text]}")
+            self._save_response_html(response, page, content_length, reason="anti_bot_detected")
+
+        # 查找主题行
         rows = response.xpath('//*[contains(@class, "topicrow")]')
-        self.logger.debug(f"📊 第 {page} 页主题列表共找到 {len(rows)} 个主题")
+        self.logger.info(f"📊 第 {page} 页主题列表共找到 {len(rows)} 个主题")
 
         # 阶段1: 收集所有主题信息
         topics_data = self._collect_topics_from_page(rows, page)
 
         if not topics_data:
-            self.logger.debug(f"⚠️ 第 {page} 页没有收集到有效主题")
+            self.logger.warning(f"⚠️ 第 {page} 页没有收集到有效主题")
+            self.logger.warning(f"⚠️ [DEBUG] 详细分析:")
+            self.logger.warning(f"  - 原始rows数量: {len(rows)}")
+            self.logger.warning(f"  - 页面内容长度: {content_length}")
+            self.logger.warning(f"  - URL: {response.url}")
+
+            # 🔍 [DEBUG] 尝试分析页面结构
+            self._analyze_page_structure(response, rows, page)
+
+            # 保存HTML用于调试
+            self.logger.info(f"💾 [DEBUG] 保存HTML文件用于调试...")
+            self._save_response_html(response, page, content_length, reason="no_topics_found")
+
             return
 
         # 阶段2: 批量查询数据库信息
@@ -249,6 +280,87 @@ class NgaSpider(scrapy.Spider):
 
         self.logger.debug(f"📄 第 {page} 页处理完成: 总计{len(topics_data)}个主题, "
                         f"爬取{len(topics_to_crawl)}个, 跳过{len(topics_to_skip)}个")
+
+    def _save_response_html(self, response, page, content_length, reason=""):
+        """保存响应HTML到调试文件"""
+        import os
+        import time
+        from urllib.parse import urlparse
+
+        debug_dir = 'debug_html'
+        if not os.path.exists(debug_dir):
+            os.makedirs(debug_dir)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        url_hash = hash(response.url) % 10000
+        filename = f"{timestamp}_page{page}_{url_hash}_{reason}.html"
+        filepath = os.path.join(debug_dir, filename)
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                debug_header = f"""
+<!-- DEBUG INFO (NGA Spider) -->
+<!-- Page: {page} -->
+<!-- URL: {response.url} -->
+<!-- Content Length: {content_length} -->
+<!-- Timestamp: {timestamp} -->
+<!-- Reason: {reason} -->
+<!-- ======================= -->
+
+"""
+                f.write(debug_header)
+                f.write(response.text)
+
+            self.logger.info(f"💾 [DEBUG] HTML已保存: {filepath}")
+            return filepath
+        except Exception as e:
+            self.logger.error(f"❌ [DEBUG] 保存HTML失败: {e}")
+            return None
+
+    def _analyze_page_structure(self, response, rows, page):
+        """分析页面结构，找出为什么没有找到主题"""
+        try:
+            # 检查页面标题
+            title = response.xpath('//title/text()').get()
+            self.logger.warning(f"  - 页面标题: {title}")
+
+            # 检查是否有错误信息
+            error_selectors = [
+                '//*[contains(text(), "404")]',
+                '//*[contains(text(), "页面不存在")]',
+                '//*[contains(text(), "访问被拒绝")]',
+                '//*[contains(text(), "请登录")]',
+            ]
+            for selector in error_selectors:
+                error_text = response.xpath(selector).get()
+                if error_text:
+                    self.logger.warning(f"  - 发现错误信息: {error_text[:100]}")
+
+            # 检查所有class包含row的元素
+            all_rows = response.xpath('//*[contains(@class, "row")]')
+            self.logger.warning(f"  - 包含'row' class的元素数量: {len(all_rows)}")
+
+            # 检查所有table行
+            table_rows = response.xpath('//tr')
+            self.logger.warning(f"  - 所有tr元素数量: {len(table_rows)}")
+
+            # 检查是否有任何链接
+            links = response.xpath('//a/@href').getall()
+            nga_links = [link for link in links if 'nga' in link or 'tid=' in link]
+            self.logger.warning(f"  - 总链接数: {len(links)}, NGA相关链接数: {len(nga_links)}")
+
+            # 检查页面是否包含预期的HTML结构
+            if 'topicrow' in response.text:
+                self.logger.warning(f"  - 页面包含'topicrow'字符串，但XPath未找到元素")
+            else:
+                self.logger.warning(f"  - 页面不包含'topicrow'字符串")
+
+            # 检查是否为空页面或重定向
+            if content_length < 500:
+                self.logger.warning(f"  - 页面内容过短，可能是空页面或重定向页面")
+
+        except Exception as e:
+            self.logger.error(f"  - 分析页面结构时出错: {e}")
 
     def _collect_topics_from_page(self, rows, page):
         """阶段1: 从页面收集所有主题的基础信息"""

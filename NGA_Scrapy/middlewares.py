@@ -210,6 +210,7 @@ class PageFetcher:
         self.logger = logger
         self._active_pages = {}  # 缓存活跃页面，格式: {browser_index: page}
         self._page_lock = threading.Lock()  # 页面访问锁
+        self.debug_dir = 'debug_html'  # HTML调试文件保存目录
 
     def fetch(self, browser_pool: List, url: str, cookies: Optional[List],
               browser_index: int, referer: str = 'https://bbs.nga.cn/') -> Dict:
@@ -246,11 +247,34 @@ class PageFetcher:
 
             page.wait_for_load_state("domcontentloaded", timeout=LOAD_TIMEOUT)
 
+            # 获取页面内容
+            page_content = page.content()
+
+            # 🔍 [DEBUG] 检查页面内容是否异常
+            content_length = len(page_content)
+            self.logger.debug(f"🔍 [DEBUG] 页面内容长度: {content_length} 字符")
+
+            # 如果页面内容过短或异常，保存HTML用于调试
+            if content_length < 1000:
+                self.logger.warning(f"⚠️ [DEBUG] 页面内容过短 ({content_length} 字符)，可能未正常加载")
+                self.save_html_debug_file(page_content, url, "content_too_short")
+
+            # 检查是否包含关键元素
+            if 'bbs.nga.cn' not in page.url and 'nga' not in page_content.lower():
+                self.logger.warning(f"⚠️ [DEBUG] 页面可能未正确加载NGA内容")
+                self.save_html_debug_file(page_content, url, "no_nga_content")
+
+            # 检查是否有反爬虫提示
+            if any(keyword in page_content for keyword in ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证']):
+                self.logger.warning(f"⚠️ [DEBUG] 检测到反爬虫或验证页面")
+                self.save_html_debug_file(page_content, url, "anti_bot")
+
             return {
                 'url': page.url,
-                'content': page.content(),
+                'content': page_content,
                 'success': True,
-                'nav_time': nav_time
+                'nav_time': nav_time,
+                'content_length': content_length
             }
         except Exception as e:
             self.logger.error(f"Page load failed: {url}, error: {type(e).__name__}: {str(e)}")
@@ -274,6 +298,43 @@ class PageFetcher:
                     pass
             self._active_pages.clear()
             self.logger.info("All cached pages closed")
+
+    def save_html_debug_file(self, content: str, url: str, reason: str = ""):
+        """保存HTML页面到调试文件"""
+        import os
+        import time
+
+        # 确保调试目录存在
+        if not os.path.exists(self.debug_dir):
+            os.makedirs(self.debug_dir)
+
+        # 生成文件名
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        # 从URL中提取有用的部分作为文件名
+        url_hash = hash(url) % 10000
+        filename = f"{timestamp}_{url_hash}_{reason}.html"
+        filepath = os.path.join(self.debug_dir, filename)
+
+        try:
+            # 保存HTML内容
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # 添加调试信息到HTML顶部
+                debug_header = f"""
+<!-- DEBUG INFO -->
+<!-- URL: {url} -->
+<!-- Timestamp: {timestamp} -->
+<!-- Reason: {reason} -->
+<!-- ======================= -->
+
+"""
+                f.write(debug_header)
+                f.write(content)
+
+            self.logger.info(f"💾 [DEBUG] HTML已保存: {filepath}")
+            return filepath
+        except Exception as e:
+            self.logger.error(f"❌ [DEBUG] 保存HTML失败: {e}")
+            return None
 
 
 # ========== 错误抑制工具 ==========
@@ -842,14 +903,28 @@ class PlaywrightMiddleware:
                         self.instance_manager.report_success(browser_index, response_time)
 
                     self.logger.info(f"✅ [页面获取成功] {request.url[:80]}... ({response_time:.2f}s)")
+                    self.logger.info(f"  🔍 [DEBUG] 内容长度: {result.get('content_length', 0)} 字符")
 
-                    return scrapy.http.HtmlResponse(
+                    # 创建响应对象
+                    response = scrapy.http.HtmlResponse(
                         url=result['url'],
                         body=result['content'].encode('utf-8'),
                         encoding='utf-8',
                         request=request,
                         status=200  # 明确设置状态码
                     )
+
+                    # 🔍 [DEBUG] 在返回响应前检查内容
+                    if result.get('content_length', 0) < 1000:
+                        self.logger.warning(f"⚠️ [DEBUG] 响应内容过短，保存HTML用于调试")
+                        if hasattr(self, '_page_fetcher'):
+                            self._page_fetcher.save_html_debug_file(
+                                result['content'],
+                                request.url,
+                                "response_too_short"
+                            )
+
+                    return response
 
                 except (PlaywrightTimeoutError, Exception) as e:
                     error_type = type(e).__name__
