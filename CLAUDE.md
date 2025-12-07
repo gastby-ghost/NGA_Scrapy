@@ -71,8 +71,8 @@ cd scheduler && python run_scheduler.py
 
 ### Browser Pool (middlewares.py:68-195)
 ```python
-# Pre-initializes browser instances (default: 6)
-# Reuses browsers for efficiency
+# Pre-initializes browser instances (default: 2)
+# Reuses pages for efficiency (single instance, multiple pages)
 # Performance monitoring included
 ```
 
@@ -131,9 +131,9 @@ sqlite3 nga.db ".tables"
 ## Key Settings
 
 ### Spider (settings.py)
-- `PLAYWRIGHT_POOL_SIZE`: Browser pool size (default: 6)
-- `DOWNLOAD_TIMEOUT`: Request timeout (default: 20s)
-- `CONCURRENT_REQUESTS`: Concurrent requests (default: 16)
+- `PLAYWRIGHT_POOL_SIZE`: Browser pool size (default: 2, optimized for single instance, multiple pages)
+- `DOWNLOAD_TIMEOUT`: Request timeout (default: 30s)
+- `CONCURRENT_REQUESTS`: Concurrent requests (default: 2, matches pool size)
 - `IMAGES_STORE`: Image storage path
 
 ### Email (email_config.yaml)

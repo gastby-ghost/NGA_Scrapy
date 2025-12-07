@@ -19,7 +19,7 @@ ITEM_PIPELINES = {
 IMAGES_STORE = 'download_images'
 
 
-PLAYWRIGHT_POOL_SIZE = 8  # 大幅增加浏览器池大小，应对两阶段优化的高并发
+PLAYWRIGHT_POOL_SIZE = 2  # 减少浏览器池大小，使用单实例多页面模式提高效率
 DOWNLOAD_TIMEOUT = 30     # 增加超时时间，应对高负载
 
 # 遵守 robots.txt 规则
@@ -39,9 +39,9 @@ LOG_DATEFORMAT = '%Y-%m-%d %H:%M:%S'
 # 已在上面定义：LOG_LEVEL, LOG_FILE, LOG_FORMAT, LOG_DATEFORMAT, LOG_FILE_MAX_BYTES, LOG_FILE_BACKUP_COUNT
 
 # 优化并发配置，平衡性能和稳定性（避免过载）
-# 降低并发数到6，与浏览器池大小匹配，避免队列拥塞
-CONCURRENT_REQUESTS = 6  # 与浏览器池大小匹配
-CONCURRENT_REQUESTS_PER_DOMAIN = 6  # 每个域名的并发数
+# 减少并发数到2，与浏览器池大小匹配，单实例多页面处理
+CONCURRENT_REQUESTS = 2  # 与浏览器池大小匹配
+CONCURRENT_REQUESTS_PER_DOMAIN = 2  # 每个域名的并发数
 DOWNLOAD_DELAY = 0.3  # 适度延迟，平衡速度和稳定性
 AUTOTHROTTLE_ENABLED = True  # 启用自动限速
 AUTOTHROTTLE_START_DELAY = 0.3  # 初始延迟

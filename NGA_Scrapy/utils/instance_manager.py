@@ -93,16 +93,34 @@ class BrowserInstanceManager:
         if not self._running:
             return
 
+        self.logger.info("🛑 [诊断] 开始停止浏览器实例管理器...")
+        self.logger.info(f"🛑 [诊断] stop()方法线程ID: {threading.get_ident()}")
+        self.logger.info(f"🛑 [诊断] 监控线程ID: {self._monitor_thread.ident if self._monitor_thread else 'None'}")
+        self.logger.info(f"🛑 [诊断] 替换线程ID: {self._replacement_thread.ident if self._replacement_thread else 'None'}")
+        self.logger.info(f"🛑 [诊断] 监控线程状态: {self._monitor_thread.is_alive() if self._monitor_thread else 'None'}")
+        self.logger.info(f"🛑 [诊断] 替换线程状态: {self._replacement_thread.is_alive() if self._replacement_thread else 'None'}")
+
         self._running = False
-        self.logger.info("🛑 正在停止浏览器实例管理器...")
+        self.logger.info("🛑 [诊断] 已设置_running = False，开始等待线程结束...")
 
         # 等待线程结束
         if self._monitor_thread and self._monitor_thread.is_alive():
+            self.logger.info("🛑 [诊断] 等待监控线程结束...")
             self._monitor_thread.join(timeout=5)
+            if self._monitor_thread.is_alive():
+                self.logger.warning("🛑 [诊断] 监控线程未在5秒内结束")
+            else:
+                self.logger.info("✅ [诊断] 监控线程已结束")
+                
         if self._replacement_thread and self._replacement_thread.is_alive():
+            self.logger.info("🛑 [诊断] 等待替换线程结束...")
             self._replacement_thread.join(timeout=5)
+            if self._replacement_thread.is_alive():
+                self.logger.warning("🛑 [诊断] 替换线程未在5秒内结束")
+            else:
+                self.logger.info("✅ [诊断] 替换线程已结束")
 
-        self.logger.info("✅ 浏览器实例管理器已停止")
+        self.logger.info("✅ [诊断] 浏览器实例管理器已停止")
 
     def register_instance(self, instance_id: int, proxy_address: Optional[str] = None):
         """注册新实例"""

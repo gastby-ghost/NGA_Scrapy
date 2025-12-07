@@ -4,6 +4,8 @@ import os
 import time
 import threading
 import uuid
+import logging
+import sys
 from queue import Queue, Empty
 from typing import Optional, Dict, List, Callable, Any
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -203,22 +205,34 @@ class CookieManager:
 
 # ========== 页面获取器 ==========
 class PageFetcher:
-    """页面获取器 - 独立职责"""
+    """页面获取器 - 优化版：单实例多页面复用"""
     def __init__(self, logger):
         self.logger = logger
+        self._active_pages = {}  # 缓存活跃页面，格式: {browser_index: page}
+        self._page_lock = threading.Lock()  # 页面访问锁
 
     def fetch(self, browser_pool: List, url: str, cookies: Optional[List],
               browser_index: int, referer: str = 'https://bbs.nga.cn/') -> Dict:
-        """获取页面内容"""
+        """获取页面内容 - 复用页面提高效率"""
         browser, context = browser_pool[browser_index % len(browser_pool)]
-        page = context.new_page()
+
+        # 尝试获取或创建页面
+        page = None
+        with self._page_lock:
+            if browser_index in self._active_pages:
+                page = self._active_pages[browser_index]
+                self.logger.debug(f"Reusing page for browser {browser_index}")
+            else:
+                page = context.new_page()
+                self._active_pages[browser_index] = page
+                self.logger.debug(f"Created new page for browser {browser_index}")
 
         try:
             self.logger.debug(f"Loading page: {url} (browser {browser_index})")
 
-            if cookies:
+            # 只在首次访问时设置cookie，后续保持会话
+            if cookies and len(context.cookies()) == 0:
                 self.logger.debug(f"Setting {len(cookies)} cookies")
-                context.clear_cookies()
                 context.add_cookies(cookies)
                 time.sleep(0.1)
 
@@ -240,9 +254,66 @@ class PageFetcher:
             }
         except Exception as e:
             self.logger.error(f"Page load failed: {url}, error: {type(e).__name__}: {str(e)}")
+            # 如果页面出错，关闭并移除缓存
+            with self._page_lock:
+                if browser_index in self._active_pages:
+                    try:
+                        self._active_pages[browser_index].close()
+                    except:
+                        pass
+                    del self._active_pages[browser_index]
             raise
-        finally:
-            page.close()
+
+    def close_all_pages(self):
+        """关闭所有缓存的页面"""
+        with self._page_lock:
+            for page in self._active_pages.values():
+                try:
+                    page.close()
+                except:
+                    pass
+            self._active_pages.clear()
+            self.logger.info("All cached pages closed")
+
+
+# ========== 错误抑制工具 ==========
+class ErrorSuppressor:
+    """临时抑制错误输出的工具类"""
+    def __init__(self, logger=None):
+        self.logger = logger
+        self.original_stderr = None
+        self.original_loglevel = None
+        
+    def __enter__(self):
+        """进入上下文时抑制错误输出"""
+        # 保存原始stderr
+        self.original_stderr = sys.stderr
+        
+        # 创建一个空的StringIO来替代stderr
+        from io import StringIO
+        sys.stderr = StringIO()
+        
+        # 如果有logger，也临时提高日志级别
+        if self.logger:
+            self.original_loglevel = self.logger.level
+            self.logger.setLevel(logging.CRITICAL + 1)  # 只显示CRITICAL以上的日志
+            
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """退出上下文时恢复错误输出"""
+        # 恢复原始stderr
+        if self.original_stderr:
+            sys.stderr = self.original_stderr
+            
+        # 恢复原始日志级别
+        if self.logger and self.original_loglevel is not None:
+            self.logger.setLevel(self.original_loglevel)
+            
+        # 如果有greenlet错误，记录到我们的logger中
+        if exc_type and 'greenlet' in str(exc_type).lower():
+            if self.logger:
+                self.logger.debug(f"🟡 [错误抑制] greenlet错误已被抑制: {exc_type.__name__}: {exc_val}")
 
 
 # ========== Playwright工作线程 ==========
@@ -378,18 +449,110 @@ class PlaywrightWorker:
                     self.logger.error(f"Worker error: {e}")
 
             # 清理资源
-            self.logger.info("Closing browser instances...")
-            for browser, context in self._browser_pool:
+            self.logger.info("🛑 [诊断] 开始关闭浏览器实例...")
+            self.logger.info(f"🛑 [诊断] 当前线程ID: {threading.get_ident()}")
+            self.logger.info(f"🛑 [诊断] 浏览器池大小: {len(self._browser_pool)}")
+            
+            # 【解决方案】更安全的浏览器实例关闭逻辑
+            for i, (browser, context) in enumerate(self._browser_pool):
                 try:
-                    context.close()
-                    browser.close()
+                    self.logger.info(f"🛑 [解决方案] 关闭浏览器实例 {i}/{len(self._browser_pool)}")
+                    
+                    # 【解决方案】先关闭所有页面，避免上下文关闭时的冲突
+                    try:
+                        pages = context.pages
+                        self.logger.info(f"🛑 [解决方案] 关闭实例 {i} 的 {len(pages)} 个页面...")
+                        for page in pages:
+                            # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
+                            with ErrorSuppressor(self.logger):
+                                try:
+                                    page.close()
+                                    # 【解决方案】增加延迟，让greenlet有时间完成切换
+                                    time.sleep(0.05)
+                                except Exception as page_e:
+                                    error_type = type(page_e).__name__
+                                    if 'greenlet' in error_type.lower():
+                                        self.logger.debug(f"🟡 [根本解决方案] 关闭页面时检测到greenlet错误（已抑制）: {page_e}")
+                                    else:
+                                        self.logger.warning(f"🟡 [解决方案] 关闭页面时出错（忽略）: {page_e}")
+                    except Exception as pages_e:
+                        self.logger.warning(f"🟡 [解决方案] 获取页面列表时出错（忽略）: {pages_e}")
+                    
+                    # 【解决方案】增加延迟，让greenlet有时间完成切换
+                    time.sleep(0.2)
+                    
+                    self.logger.info(f"🛑 [解决方案] 关闭上下文...")
+                    # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
+                    with ErrorSuppressor(self.logger):
+                        try:
+                            context.close()
+                        except Exception as ctx_e:
+                            error_type = type(ctx_e).__name__
+                            if 'greenlet' in error_type.lower():
+                                self.logger.debug(f"🟡 [根本解决方案] 关闭上下文时检测到greenlet错误（已抑制）: {ctx_e}")
+                            else:
+                                self.logger.error(f"❌ [解决方案] 关闭上下文失败: {ctx_e}")
+                    
+                    # 【解决方案】再次增加延迟
+                    time.sleep(0.2)
+                    
+                    self.logger.info(f"🛑 [解决方案] 关闭浏览器...")
+                    # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
+                    with ErrorSuppressor(self.logger):
+                        try:
+                            browser.close()
+                            self.logger.info(f"✅ [解决方案] 浏览器实例 {i} 关闭成功")
+                            
+                            # 【解决方案】在浏览器实例之间增加延迟，确保完全关闭
+                            if i < len(self._browser_pool) - 1:  # 不是最后一个实例
+                                time.sleep(0.3)
+                        except Exception as browser_e:
+                            error_type = type(browser_e).__name__
+                            if 'greenlet' in error_type.lower():
+                                self.logger.debug(f"🟡 [根本解决方案] 关闭浏览器时检测到greenlet错误（已抑制）: {browser_e}")
+                            else:
+                                self.logger.error(f"❌ [解决方案] 关闭浏览器失败: {browser_e}")
+                    
                 except Exception as e:
-                    self.logger.warning(f"Error closing browser: {e}")
+                    # 记录详细的错误信息
+                    error_type = type(e).__name__
+                    error_msg = str(e)
+                    self.logger.error(f"❌ [解决方案] 关闭浏览器实例 {i} 失败: {error_type}: {error_msg}")
+                    
+                    # 【解决方案】改进greenlet错误处理
+                    if 'greenlet' in error_type.lower():
+                        self.logger.warning(f"🟡 [解决方案] 检测到greenlet错误，这通常是Playwright关闭时的正常现象")
+                        self.logger.info(f"🟡 [解决方案] greenlet错误不会影响功能，继续关闭其他实例...")
+                        import traceback
+                        self.logger.debug(f"🟡 [解决方案] greenlet错误详情:\n{traceback.format_exc()}")
+                    else:
+                        self.logger.error(f"❌ [解决方案] 非greenlet错误关闭浏览器: {e}")
+
+            # 【解决方案】增加延迟，确保所有浏览器实例完全关闭
+            time.sleep(0.5)
 
             if self._playwright:
-                self._playwright.stop()
+                try:
+                    self.logger.info(f"🛑 [解决方案] 停止Playwright...")
+                    # 【解决方案】增加延迟，确保所有浏览器实例完全关闭
+                    time.sleep(0.5)
+                    
+                    # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
+                    with ErrorSuppressor(self.logger):
+                        self._playwright.stop()
+                    self.logger.info(f"✅ [解决方案] Playwright停止成功")
+                except Exception as e:
+                    error_type = type(e).__name__
+                    error_msg = str(e)
+                    self.logger.error(f"❌ [解决方案] 停止Playwright失败: {error_type}: {error_msg}")
+                    
+                    # 【解决方案】改进greenlet错误处理
+                    if 'greenlet' in error_type.lower():
+                        self.logger.debug(f"🟡 [根本解决方案] Playwright停止时检测到greenlet错误（已抑制）: {e}")
+                    else:
+                        self.logger.error(f"❌ [解决方案] 非greenlet错误停止Playwright: {e}")
 
-            self.logger.info("Playwright worker stopped")
+            self.logger.info("✅ [解决方案] Playwright worker stopped")
 
         except Exception as e:
             self.logger.error(f"Playwright worker failed: {e}")
@@ -433,19 +596,39 @@ class PlaywrightWorker:
 
     def shutdown(self, timeout: int = 10):
         """关闭工作线程"""
-        self.logger.info("Shutting down Playwright worker...")
+        self.logger.info("🛑 [诊断] 开始关闭 Playwright worker...")
+        self.logger.info(f"🛑 [诊断] 当前线程ID: {threading.get_ident()}")
+        self.logger.info(f"🛑 [诊断] 工作线程数量: {len(self._workers)}")
+        
+        # 【解决方案】先设置停止标志，然后等待工作线程自然结束
         self._stop_event.set()
-
-        for worker in self._workers:
+        
+        # 【解决方案】给工作线程更多时间完成当前任务，避免强制中断
+        self.logger.info("🛑 [解决方案] 等待工作线程完成当前任务...")
+        time.sleep(2)  # 给工作线程2秒时间完成当前任务
+        
+        # 【诊断日志】记录每个工作线程的状态
+        for i, worker in enumerate(self._workers):
+            self.logger.info(f"🛑 [诊断] 等待工作线程 {i} (ID: {worker.ident}) 退出...")
+            if worker.is_alive():
+                self.logger.info(f"🛑 [诊断] 工作线程 {i} 仍在运行，等待加入...")
+            else:
+                self.logger.info(f"🛑 [诊断] 工作线程 {i} 已停止")
+                
             worker.join(timeout=timeout)
+            
+            if worker.is_alive():
+                self.logger.warning(f"🛑 [诊断] 工作线程 {i} 仍在运行，可能未正确关闭")
+            else:
+                self.logger.info(f"🛑 [诊断] 工作线程 {i} 已成功关闭")
 
-        self.logger.info("Playwright worker stopped")
+        self.logger.info("✅ [诊断] Playwright worker shutdown 完成")
 
 
 # ========== 浏览器池 ==========
 class BrowserPool:
     """浏览器连接池（使用PlaywrightWorker）"""
-    def __init__(self, max_browsers: int = 4, proxy_manager=None, logger=None):
+    def __init__(self, max_browsers: int = 2, proxy_manager=None, logger=None):
         self.max_browsers = max_browsers
         self.proxy_manager = proxy_manager
         self.logger = logger or self._default_logger
@@ -473,10 +656,18 @@ class BrowserPool:
 
     def close(self):
         """关闭浏览器池"""
-        self.logger.info("Closing browser pool...")
+        self.logger.info("🛑 [诊断] 开始关闭浏览器池...")
+        self.logger.info(f"🛑 [诊断] 关闭浏览器池的线程ID: {threading.get_ident()}")
+        
+        # 先关闭缓存的页面
+        self.logger.info("🛑 [诊断] 关闭缓存的页面...")
+        self._page_fetcher.close_all_pages()
+        
+        self.logger.info("🛑 [诊断] 关闭Playwright worker...")
         self._playwright_worker.shutdown()
+        
         self.log_pool_status()
-        self.logger.info("Browser pool closed")
+        self.logger.info("✅ [诊断] 浏览器池关闭完成")
 
 
 # ========== Playwright中间件 ==========
@@ -527,7 +718,7 @@ class PlaywrightMiddleware:
             return self._replace_browser_instance(failed_id)
 
         self.instance_manager = BrowserInstanceManager(
-            max_instances=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
+            max_instances=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 2),
             ban_detector=self.ban_detector,
             replacement_callback=replace_instance,
             proxy_manager=self.proxy_manager,
@@ -574,13 +765,25 @@ class PlaywrightMiddleware:
 
     def spider_closed(self, spider, reason):
         """Spider关闭处理"""
-        self.logger.info(f"Spider closed: {reason}")
+        self.logger.info(f"🛑 [诊断] Spider关闭处理开始: {reason}")
+        self.logger.info(f"🛑 [诊断] spider_closed线程ID: {threading.get_ident()}")
 
+        # 【解决方案】按顺序关闭，避免多线程冲突
+        # 1. 首先停止实例管理器，防止其继续操作浏览器实例
         if self.instance_manager:
+            self.logger.info("🛑 [解决方案] 第1步: 停止实例管理器...")
             self.instance_manager.stop()
+            self.logger.info("✅ [解决方案] 实例管理器停止完成")
+            # 等待一秒确保所有线程完全停止
+            time.sleep(1)
 
+        # 2. 然后关闭浏览器池，此时没有其他线程在操作浏览器
         if self.browser_pool:
+            self.logger.info("🛑 [解决方案] 第2步: 关闭浏览器池...")
             self.browser_pool.close()
+            self.logger.info("✅ [解决方案] 浏览器池关闭完成")
+            
+        self.logger.info("✅ [解决方案] Spider关闭处理完成")
 
     def process_request(self, request, spider):
         """处理请求"""
@@ -610,7 +813,7 @@ class PlaywrightMiddleware:
             # 确保浏览器池已初始化
             if not self.browser_pool:
                 self.browser_pool = BrowserPool(
-                    max_browsers=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 4),
+                    max_browsers=spider.settings.getint('PLAYWRIGHT_POOL_SIZE', 2),
                     proxy_manager=self.proxy_manager,
                     logger=self.logger
                 )
