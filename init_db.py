@@ -26,9 +26,15 @@ def init_db():
         print("正在删除旧表...")
         Base.metadata.drop_all(engine)
 
-        # 创建所有表
-        print("正在创建新表...")
+        # 创建所有表（包括索引）
+        print("正在创建新表和索引...")
         Base.metadata.create_all(engine)
+
+        # 验证索引创建
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        topic_indexes = inspector.get_indexes('topic')
+        reply_indexes = inspector.get_indexes('reply')
 
         print("\n" + "=" * 60)
         print("✅ PostgreSQL数据库表重建成功！")
@@ -37,10 +43,23 @@ def init_db():
         print("连接池配置: 15 基础连接 + 30 溢出连接")
         print("=" * 60)
 
+        print("\n📊 索引统计:")
+        print(f"  Topic表索引数: {len(topic_indexes)}")
+        print(f"  Reply表索引数: {len(reply_indexes)}")
+        print(f"  总索引数: {len(topic_indexes) + len(reply_indexes)}")
+
+        print("\n✅ 已创建索引:")
+        print("  Topic表:")
+        for idx in topic_indexes:
+            print(f"    - {idx['name']}")
+        print("  Reply表:")
+        for idx in reply_indexes:
+            print(f"    - {idx['name']}")
+
         print("\n💡 PostgreSQL优化建议:")
         print("  1. 可以同时处理多个并发请求")
         print("  2. 建议定期执行 VACUUM ANALYZE")
-        print("  3. 考虑为常用字段添加索引")
+        print("  3. 索引已自动创建，性能优化就绪")
         print("\n查看表结构:")
         print("  \\d user")
         print("  \\d topic")

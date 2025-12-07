@@ -94,7 +94,10 @@ import time
 from datetime import datetime
 from sqlalchemy.orm import scoped_session
 from sqlalchemy.exc import SQLAlchemyError
-from ..models import Base  # 确保导入Base
+from ..models import Base
+from ..utils.monitoring import get_monitor, record_batch_query
+from ..utils.cache_manager import get_cache_manager
+from ..utils.query_optimizer import QueryOptimizer
 import psutil
 import os
 
@@ -110,6 +113,12 @@ class NgaSpider(scrapy.Spider):
 
         # 缓存主题的最新回复时间，减少数据库查询
         self.topic_last_reply_cache = {}
+        # 初始化缓存管理器
+        self.cache_manager = get_cache_manager()
+        # 初始化查询优化器
+        self.query_optimizer = None  # 将在数据库初始化后设置
+        # 初始化数据归档器（月度归档）
+        self.data_archiver = None  # 将在数据库初始化后设置
         # 数据库相关属性
         self.db_session = None
         self.db_url = kwargs.get('db_url')  # 允许从命令行传入db_url
@@ -125,20 +134,51 @@ class NgaSpider(scrapy.Spider):
     def _init_db(self):
         """初始化数据库连接"""
         from ..utils.db_utils import create_db_session
+        from ..utils.data_archiver import DataArchiver
         try:
             # 使用scoped_session包装，确保线程安全
             session_factory = create_db_session(self.db_url)
             if session_factory is None:
                 raise RuntimeError("无法创建数据库会话工厂")
-            
+
             self.db_session = scoped_session(lambda: session_factory)
-            self.logger.info("数据库连接初始化成功")
+
+            # 初始化查询优化器
+            self.query_optimizer = QueryOptimizer(self.db_session, self.logger)
+
+            # 初始化数据归档器（月度归档）
+            if self.data_archiver is None:
+                self.data_archiver = DataArchiver(
+                    self.db_session,
+                    archive_dir='./archive',
+                    config={
+                        'enabled': True,
+                        'archive_threshold_days': 30,  # 30天未更新则归档
+                    }
+                )
+
+            self.logger.info("数据库连接和优化组件初始化成功")
         except Exception as e:
             self.logger.error(f"数据库初始化失败: {e}")
             raise
     
     def close(self, reason):
         """爬虫关闭时清理资源"""
+        # 执行月度数据归档
+        if hasattr(self, 'data_archiver') and self.data_archiver:
+            try:
+                self.logger.info("开始执行月度数据归档...")
+                archive_results = self.data_archiver.auto_archive()
+                self.logger.info(f"归档结果: {archive_results}")
+
+                # 清理过期归档文件
+                cleaned_count = self.data_archiver.cleanup_old_archives(retention_days=365)
+                self.logger.info(f"清理了 {cleaned_count} 个过期归档文件")
+
+            except Exception as e:
+                self.logger.error(f"数据归档失败: {e}")
+
+        # 关闭数据库会话
         if hasattr(self, 'db_session') and self.db_session:
             try:
                 self.db_session.remove()
@@ -442,11 +482,14 @@ class NgaSpider(scrapy.Spider):
             self.logger.error(f"获取最后回复时间时发生意外错误: {e}")
             return None
 
-    def batch_query_topics_from_db(self, tids):
-        """批量查询数据库中多个主题的信息
+    def batch_query_topics_from_db(self, tids, batch_size=100, use_cache=True, use_exists_optimization=True):
+        """批量查询数据库中多个主题的信息（终极优化版本）
 
         Args:
             tids: 主题ID列表
+            batch_size: 每批查询的主题数量，默认100
+            use_cache: 是否使用缓存，默认True
+            use_exists_optimization: 是否使用EXISTS优化，默认True
 
         Returns:
             dict: {tid: {'last_reply_date': str, 'post_time': str, 're_num': int}}
@@ -458,28 +501,196 @@ class NgaSpider(scrapy.Spider):
         if not tids:
             return {}
 
-        try:
-            from ..models import Topic  # 局部导入避免循环引用
-            # 批量查询主题信息
-            topics = self.db_session.query(Topic).filter(Topic.tid.in_(tids)).all()
+        # 导入模块
+        from ..models import Topic
+        import time
 
-            result = {}
-            for topic in topics:
-                result[topic.tid] = {
-                    'last_reply_date': topic.last_reply_date,
-                    'post_time': topic.post_time,
-                    're_num': topic.re_num
-                }
+        total_tids = len(tids)
+        result = {}
+        cached_count = 0
+        db_query_count = 0
+        query_strategy = 'in_query'  # 默认查询策略
 
-            self.logger.debug(f"🗄️ 批量查询数据库: 查询{len(tids)}个主题，找到{len(result)}个记录")
-            return result
+        # 缓存键前缀
+        cache_prefix = 'topic_info:'
 
-        except SQLAlchemyError as e:
-            self.logger.error(f"批量查询数据库出错: {e}")
-            return {}
-        except Exception as e:
-            self.logger.error(f"批量查询时发生意外错误: {e}")
-            return {}
+        # 第一步：优先从缓存获取数据
+        if use_cache:
+            for tid in tids:
+                cache_key = f"{cache_prefix}{tid}"
+                cached_data = self.cache_manager.get(cache_key)
+                if cached_data is not None:
+                    result[tid] = cached_data
+                    cached_count += 1
+
+            self.logger.debug(f"💾 [缓存] 从缓存获取 {cached_count}/{total_tids} 个主题数据")
+
+        # 第二步：查询数据库获取未缓存的数据
+        if use_cache:
+            # 找出未缓存的TID
+            uncached_tids = [tid for tid in tids if tid not in result]
+        else:
+            uncached_tids = tids
+
+        if uncached_tids:
+            # 根据数据量选择最优查询策略
+            if use_exists_optimization and len(uncached_tids) > 1000 and self.query_optimizer:
+                # 大量数据：使用EXISTS查询优化
+                query_strategy = 'exists_query'
+                existing_tids = self.query_optimizer.check_topics_exist_exists(uncached_tids)
+
+                # 只查询存在的主题
+                if existing_tids:
+                    existing_list = list(existing_tids)
+                    for i in range(0, len(existing_list), batch_size):
+                        batch_tids = existing_list[i:i + batch_size]
+                        batch_num = i // batch_size + 1
+
+                        query_start_time = time.time()
+                        try:
+                            topics = self.db_session.query(Topic).filter(Topic.tid.in_(batch_tids)).all()
+
+                            batch_result_count = 0
+                            for topic in topics:
+                                topic_data = {
+                                    'last_reply_date': topic.last_reply_date,
+                                    'post_time': topic.post_time,
+                                    're_num': topic.re_num
+                                }
+                                result[topic.tid] = topic_data
+                                batch_result_count += 1
+
+                                # 写入缓存
+                                if use_cache:
+                                    cache_key = f"{cache_prefix}{topic.tid}"
+                                    self.cache_manager.set(cache_key, topic_data)
+
+                            db_query_count += 1
+
+                            batch_elapsed = time.time() - query_start_time
+                            self.logger.debug(
+                                f"✅ [EXISTS优化] 批次 {batch_num}: 耗时{batch_elapsed:.3f}s, "
+                                f"返回{batch_result_count}条记录"
+                            )
+
+                        except Exception as e:
+                            self.logger.error(f"EXISTS优化批次 {batch_num} 查询出错: {e}")
+                            continue
+
+            else:
+                # 中小数据：使用标准分批IN查询
+                query_strategy = 'batch_in_query'
+                total_batches = (len(uncached_tids) + batch_size - 1) // batch_size
+                query_count = 0
+                start_time = time.time()
+
+                for i in range(0, len(uncached_tids), batch_size):
+                    batch_tids = uncached_tids[i:i + batch_size]
+                    batch_num = i // batch_size + 1
+
+                    query_count += 1
+                    query_start_time = time.time()
+
+                    try:
+                        # 记录查询日志
+                        if total_batches > 1:
+                            self.logger.debug(f"🗄️ [DB调试] 批次 {batch_num}/{total_batches}: 查询{len(batch_tids)}个主题")
+                        else:
+                            self.logger.debug(f"🗄️ [DB调试] 查询{len(batch_tids)}个主题")
+
+                        # 执行批次查询
+                        topics = self.db_session.query(Topic).filter(Topic.tid.in_(batch_tids)).all()
+
+                        # 处理查询结果
+                        batch_result_count = 0
+                        for topic in topics:
+                            topic_data = {
+                                'last_reply_date': topic.last_reply_date,
+                                'post_time': topic.post_time,
+                                're_num': topic.re_num
+                            }
+                            result[topic.tid] = topic_data
+                            batch_result_count += 1
+
+                            # 写入缓存
+                            if use_cache:
+                                cache_key = f"{cache_prefix}{topic.tid}"
+                                self.cache_manager.set(cache_key, topic_data)
+
+                        db_query_count += 1
+
+                        # 记录单批查询耗时
+                        batch_elapsed = time.time() - query_start_time
+
+                        # 慢查询告警（>500ms）
+                        if batch_elapsed > 0.5:
+                            self.logger.warning(
+                                f"⚠️ [慢查询告警] 批次 {batch_num} 查询耗时 {batch_elapsed:.3f}s "
+                                f"(查询{len(batch_tids)}个主题，返回{batch_result_count}条记录)"
+                            )
+
+                        if total_batches > 1:
+                            self.logger.debug(
+                                f"✅ 批次 {batch_num} 完成: 耗时{batch_elapsed:.3f}s, "
+                                f"返回{batch_result_count}条记录"
+                            )
+
+                    except SQLAlchemyError as e:
+                        self.logger.error(f"批次 {batch_num} 批量查询数据库出错: {e}")
+                        continue
+                    except Exception as e:
+                        self.logger.error(f"批次 {batch_num} 批量查询时发生意外错误: {e}")
+                        continue
+
+                # 记录总查询耗时
+                total_elapsed = time.time() - start_time
+
+                # 记录到监控系统
+                monitor = get_monitor()
+                monitor.record_query(total_elapsed, 'batch', batch_size, len(uncached_tids))
+
+                # 查询性能统计
+                avg_query_time = total_elapsed / query_count if query_count > 0 else 0
+
+                self.logger.info(
+                    f"🗄️ [DB性能统计] 未缓存查询: {len(uncached_tids)}个主题, "
+                    f"分{query_count}批, 总耗时{total_elapsed:.3f}s, "
+                    f"平均每批{avg_query_time:.3f}s"
+                )
+
+                # 整体慢查询告警（>2000ms）
+                if total_elapsed > 2.0:
+                    self.logger.warning(
+                        f"⚠️ [整体慢查询告警] 批量查询总耗时 {total_elapsed:.3f}s "
+                        f"(查询{len(uncached_tids)}个主题，建议优化)"
+                    )
+
+                # 每1000个主题的性能报告
+                if len(uncached_tids) >= 1000:
+                    throughput = len(uncached_tids) / total_elapsed if total_elapsed > 0 else 0
+                    self.logger.info(
+                        f"📊 [性能报告] 查询吞吐量: {throughput:.1f} 主题/秒 "
+                        f"({len(uncached_tids)}个主题 / {total_elapsed:.3f}s)"
+                    )
+
+        # 第三步：汇总统计信息
+        cache_hit_rate = (cached_count / total_tids * 100) if total_tids > 0 else 0
+
+        self.logger.info(
+            f"🎯 [查询策略] 使用策略: {query_strategy}, "
+            f"缓存命中: {cached_count}/{total_tids} ({cache_hit_rate:.1f}%), "
+            f"数据库查询: {db_query_count}批次, "
+            f"找到{len(result)}条记录"
+        )
+
+        # 缓存命中率低告警（<50%）
+        if use_cache and cache_hit_rate < 50:
+            self.logger.warning(
+                f"⚠️ [缓存命中率告警] 缓存命中率 {cache_hit_rate:.1f}% 较低 "
+                f"(建议检查缓存配置或增加缓存时间)"
+            )
+
+        return result
 
     # 其他方法保持不变...
     def parse_replies(self, response):

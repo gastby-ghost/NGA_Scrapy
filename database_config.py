@@ -25,6 +25,9 @@ POSTGRES_CONFIG = {
 
 def get_database_url() -> str:
     """获取PostgreSQL数据库连接URL"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     password = POSTGRES_CONFIG['password']
     # 如果密码包含特殊字符，需要URL编码
     from urllib.parse import quote
@@ -35,6 +38,16 @@ def get_database_url() -> str:
         f"@{POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}"
         f"/{POSTGRES_CONFIG['database']}"
     )
+    
+    # 🔍 添加配置诊断日志
+    logger.info(f"🔍 [配置诊断] 数据库配置:")
+    logger.info(f"  - 主机: {POSTGRES_CONFIG['host']}")
+    logger.info(f"  - 端口: {POSTGRES_CONFIG['port']}")
+    logger.info(f"  - 用户: {POSTGRES_CONFIG['user']}")
+    logger.info(f"  - 数据库: {POSTGRES_CONFIG['database']}")
+    logger.info(f"  - 密码长度: {len(password)} 字符")
+    logger.info(f"🔍 [配置诊断] 生成的URL: postgresql://{POSTGRES_CONFIG['user']}:***@{POSTGRES_CONFIG['host']}:{POSTGRES_CONFIG['port']}/{POSTGRES_CONFIG['database']}")
+    
     return url
 
 def get_engine_args() -> dict:
