@@ -130,13 +130,13 @@ class ProcessLock:
 
             # 检查进程是否还在运行
             if not self._is_process_alive(pid):
-                logger.info(f"检测到过期锁文件，进程 {pid} 已不存在")
+                logger.debug(f"检测到过期锁文件，进程 {pid} 已不存在")
                 os.unlink(self.lock_file_path)
                 return True
 
             # 检查锁是否超时
             if self._is_lock_expired(lock_info):
-                logger.info(f"检测到超时锁文件，进程 {pid} 运行时间超过 {self.timeout} 秒")
+                logger.debug(f"检测到超时锁文件，进程 {pid} 运行时间超过 {self.timeout} 秒")
 
                 # 尝试终止过期进程
                 try:
@@ -220,7 +220,7 @@ class ProcessLock:
                 self.is_locked = True
                 self.lock_time = datetime.now()
 
-                logger.info(f"✅ 成功获取进程锁，PID: {os.getpid()}")
+                logger.debug(f"✅ 成功获取进程锁，PID: {os.getpid()}")
                 return True
 
             except IOError as e:
@@ -272,7 +272,7 @@ class ProcessLock:
 
             self.is_locked = False
             lock_duration = datetime.now() - self.lock_time if self.lock_time else timedelta(0)
-            logger.info(f"✅ 成功释放进程锁，运行时长: {lock_duration}")
+            logger.debug(f"✅ 成功释放进程锁，运行时长: {lock_duration}")
 
         except Exception as e:
             logger.error(f"释放锁时发生错误: {e}")

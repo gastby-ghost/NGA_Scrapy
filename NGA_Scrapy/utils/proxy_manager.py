@@ -72,7 +72,7 @@ class ProxyManager:
         # 日志
         self.logger = logging.getLogger(__name__)
 
-        self.logger.info(f"代理管理器已初始化 - API: {self.api_url}, 提取数量: {self.num}, 最小代理数: {self.min_proxies}")
+        self.logger.debug(f"代理管理器已初始化 - API: {self.api_url}, 提取数量: {self.num}, 最小代理数: {self.min_proxies}")
 
     def _generate_sign(self) -> str:
         """
@@ -113,7 +113,7 @@ class ProxyManager:
                 return self.proxy_pool
 
         # 获取新代理
-        self.logger.info(f"正在从 API 获取代理，force_refresh={force_refresh}")
+        self.logger.debug(f"正在从 API 获取代理，force_refresh={force_refresh}")
         try:
             proxies = self._fetch_proxies_from_api()
             if proxies:
@@ -128,7 +128,7 @@ class ProxyManager:
                 self.stats['last_fetch_count'] = len(proxies)
                 self.stats['last_error'] = None
 
-                self.logger.info(f"✅ 成功获取 {len(proxies)} 个代理 (总计获取: {self.stats['total_fetched']} 次)")
+                self.logger.debug(f"✅ 成功获取 {len(proxies)} 个代理 (总计获取: {self.stats['total_fetched']} 次)")
                 return self.proxy_pool
             else:
                 # 未获取到代理，保留现有代理池
@@ -167,10 +167,10 @@ class ProxyManager:
         for attempt in range(self.max_retries):
             try:
                 if attempt > 0:
-                    self.logger.info(f"🔄 第 {attempt + 1} 次重试获取代理...")
+                    self.logger.debug(f"🔄 第 {attempt + 1} 次重试获取代理...")
                     time.sleep(self.retry_interval)
 
-                self.logger.info(f"正在调用代理API: {self.api_url}")
+                self.logger.debug(f"正在调用代理API: {self.api_url}")
                 self.logger.debug(f"请求参数: {params}")
 
                 response = requests.get(
@@ -192,7 +192,7 @@ class ProxyManager:
                         line = line.strip()
                         if line:
                             proxy_list.append(line)
-                    self.logger.info(f"API返回文本格式: 代理列表={len(proxy_list)}")
+                    self.logger.debug(f"API返回文本格式: 代理列表={len(proxy_list)}")
 
                     # 检查是否获取到有效代理
                     if proxy_list:
@@ -233,7 +233,7 @@ class ProxyManager:
                     count = data.get('data', {}).get('count', 0)
                     surplus = data.get('data', {}).get('surplus_quantity', 0)
 
-                    self.logger.info(f"API返回: 总数={count}, 剩余={surplus}, 代理列表={len(proxy_list)}")
+                    self.logger.debug(f"API返回: 总数={count}, 剩余={surplus}, 代理列表={len(proxy_list)}")
 
                     return proxy_list
 
@@ -278,7 +278,7 @@ class ProxyManager:
         # 如果所有代理都已使用，清空记录或重新获取
         if not available_proxies:
             if len(self.proxy_pool) < self.min_proxies:
-                self.logger.info("代理池数量不足，重新获取")
+                self.logger.debug("代理池数量不足，重新获取")
                 self.get_proxies(force_refresh=True)
                 available_proxies = self.proxy_pool
             else:
@@ -437,7 +437,7 @@ class ProxyManager:
         Returns:
             测试结果摘要
         """
-        self.logger.info(f"🧪 开始测试代理连通性 (最多测试 {max_test} 个)")
+        self.logger.debug(f"🧪 开始测试代理连通性 (最多测试 {max_test} 个)")
 
         proxies = self.get_proxies()
         if not proxies:
@@ -457,9 +457,9 @@ class ProxyManager:
 
             if test_result['success']:
                 success_count += 1
-                self.logger.info(f"  ✅ 测试 {i+1}/{min(max_test, len(proxies))}: {proxy_dict.get('proxy')} - 成功 (耗时: {test_result['elapsed']:.2f}s)")
+                self.logger.debug(f"  ✅ 测试 {i+1}/{min(max_test, len(proxies))}: {proxy_dict.get('proxy')} - 成功 (耗时: {test_result['elapsed']:.2f}s)")
                 if 'proxy_ip' in test_result:
-                    self.logger.info(f"     代理IP: {test_result['proxy_ip']}")
+                    self.logger.debug(f"     代理IP: {test_result['proxy_ip']}")
             else:
                 failed_count += 1
                 self.logger.warning(f"  ❌ 测试 {i+1}/{min(max_test, len(proxies))}: {proxy_dict.get('proxy')} - 失败: {test_result['error']}")
@@ -500,7 +500,7 @@ class ProxyManager:
         """清空代理池"""
         self.proxy_pool.clear()
         self._used_proxies.clear()
-        self.logger.info("代理池已清空")
+        self.logger.debug("代理池已清空")
 
 
 # 全局代理管理器实例

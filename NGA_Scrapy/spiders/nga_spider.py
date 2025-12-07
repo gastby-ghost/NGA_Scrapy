@@ -225,7 +225,7 @@ class NgaSpider(scrapy.Spider):
 
         # 🔍 [DEBUG] 添加详细的页面信息
         content_length = len(response.text)
-        self.logger.info(f"🔍 [DEBUG] 页面内容长度: {content_length} 字符")
+        self.logger.debug(f"🔍 [DEBUG] 页面内容长度: {content_length} 字符")
 
         # 保存页面HTML用于调试
         self._save_response_html(response, page, content_length)
@@ -259,20 +259,20 @@ class NgaSpider(scrapy.Spider):
             self._analyze_page_structure(response, rows, page)
 
             # 保存HTML用于调试
-            self.logger.info(f"💾 [DEBUG] 保存HTML文件用于调试...")
+            self.logger.debug(f"💾 [DEBUG] 保存HTML文件用于调试...")
             self._save_response_html(response, page, content_length, reason="no_topics_found")
 
             return
 
         # 阶段2: 批量查询数据库信息
         all_tids = list(topics_data.keys())
-        self.logger.info(f"🗄️ [DB调试] 第{page}页: 准备查询{len(all_tids)}个主题的数据库记录")
+        self.logger.debug(f"🗄️ [DB调试] 第{page}页: 准备查询{len(all_tids)}个主题的数据库记录")
         db_info = self.batch_query_topics_from_db(all_tids)
-        self.logger.info(f"🗄️ [DB调试] 第{page}页: 数据库返回{len(db_info)}条记录, 新主题数: {len(all_tids) - len(db_info)}")
+        self.logger.debug(f"🗄️ [DB调试] 第{page}页: 数据库返回{len(db_info)}条记录, 新主题数: {len(all_tids) - len(db_info)}")
 
         # 阶段3: 智能决策哪些主题需要爬取回复
         topics_to_crawl, topics_to_skip = self._decide_topics_to_crawl(topics_data, db_info)
-        self.logger.info(f"🗄️ [DB调试] 第{page}页决策结果: 需爬取{len(topics_to_crawl)}个, 跳过{len(topics_to_skip)}个")
+        self.logger.debug(f"🗄️ [DB调试] 第{page}页决策结果: 需爬取{len(topics_to_crawl)}个, 跳过{len(topics_to_skip)}个")
 
         # 阶段4: 批量生成数据项和请求
         for item in self._process_topics_batch(topics_to_crawl, topics_to_skip, db_info):
@@ -311,7 +311,7 @@ class NgaSpider(scrapy.Spider):
                 f.write(debug_header)
                 f.write(response.text)
 
-            self.logger.info(f"💾 [DEBUG] HTML已保存: {filepath}")
+            self.logger.debug(f"💾 [DEBUG] HTML已保存: {filepath}")
             return filepath
         except Exception as e:
             self.logger.error(f"❌ [DEBUG] 保存HTML失败: {e}")
@@ -547,14 +547,14 @@ class NgaSpider(scrapy.Spider):
             if (i + 1) % 10 == 0:
                 if hasattr(self.crawler.engine, 'scheduler') and hasattr(self.crawler.engine.scheduler, 'queue'):
                     queue_size = len(self.crawler.engine.scheduler.queue)
-                    self.logger.info(f"📊 [生成请求队列诊断] 已生成{i+1}个请求，当前调度队列长度: {queue_size}")
+                    self.logger.debug(f"📊 [生成请求队列诊断] 已生成{i+1}个请求，当前调度队列长度: {queue_size}")
 
-        self.logger.info(f"🗄️ [DB调试] 批处理完成: 生成{reply_requests_count}个回复页请求, 跳过{len(topics_to_skip)}个主题")
+        self.logger.debug(f"🗄️ [DB调试] 批处理完成: 生成{reply_requests_count}个回复页请求, 跳过{len(topics_to_skip)}个主题")
 
         # 队列状态监控 - 关键调试信息
         if hasattr(self.crawler.engine, 'scheduler') and hasattr(self.crawler.engine.scheduler, 'queue'):
             queue_size = len(self.crawler.engine.scheduler.queue)
-            self.logger.info(f"📊 [队列监控] 当前调度队列长度: {queue_size}, 生成请求总数: {reply_requests_count}")
+            self.logger.debug(f"📊 [队列监控] 当前调度队列长度: {queue_size}, 生成请求总数: {reply_requests_count}")
             if queue_size > 100:
                 self.logger.warning(f"⚠️ [队列拥塞] 队列长度({queue_size})超过100，可能导致处理延迟！")
         else:
@@ -807,12 +807,12 @@ class NgaSpider(scrapy.Spider):
     # 其他方法保持不变...
     def parse_replies(self, response):
         # 立即记录方法被调用，用于调试
-        self.logger.info(f"🎯 parse_replies方法被调用! URL: {response.url}, Status: {response.status}")
-        
+        self.logger.debug(f"🎯 parse_replies方法被调用! URL: {response.url}, Status: {response.status}")
+
         # 【诊断日志】记录调度队列状态
         if hasattr(self.crawler.engine, 'scheduler') and hasattr(self.crawler.engine.scheduler, 'queue'):
             queue_size = len(self.crawler.engine.scheduler.queue)
-            self.logger.info(f"📊 [parse_replies队列诊断] 当前调度队列长度: {queue_size}")
+            self.logger.debug(f"📊 [parse_replies队列诊断] 当前调度队列长度: {queue_size}")
 
         tid = response.meta['tid']
         db_last_reply = response.meta.get('db_last_reply')

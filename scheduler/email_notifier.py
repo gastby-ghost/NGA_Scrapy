@@ -142,7 +142,7 @@ class EmailNotifier:
                             f'attachment; filename= {os.path.basename(file_path)}'
                         )
                         msg.attach(part)
-                        logger.info(f"已添加附件: {file_path}")
+                        logger.debug(f"已添加附件: {file_path}")
 
             # 发送邮件
             try:
@@ -673,7 +673,7 @@ class StatisticsCollector:
                 logger.warning(f"未找到统计文件: {self.stats_dir}")
                 return aggregated_stats
 
-            logger.info(f"找到 {len(stats_files)} 个统计文件")
+            logger.debug(f"找到 {len(stats_files)} 个统计文件")
 
             file_count = 0
             latest_status = 'unknown'
@@ -804,11 +804,11 @@ class StatisticsCollector:
                     'has_trend': False
                 }
 
-            logger.info(f"成功聚合了 {file_count} 个统计文件的数据")
-            logger.info(f"统计汇总: 总执行次数={aggregated_stats['total_runs']}, "
+            logger.debug(f"成功聚合了 {file_count} 个统计文件的数据")
+            logger.debug(f"统计汇总: 总执行次数={aggregated_stats['total_runs']}, "
                        f"成功={aggregated_stats['successful_runs']}, "
                        f"失败={aggregated_stats['failed_runs']}")
-            logger.info(f"累计抓取项目: {aggregated_stats['items_scraped']}, "
+            logger.debug(f"累计抓取项目: {aggregated_stats['items_scraped']}, "
                        f"累计爬取页面: {aggregated_stats['pages_crawled']}")
 
         except Exception as e:

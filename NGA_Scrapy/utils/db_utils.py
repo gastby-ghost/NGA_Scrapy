@@ -33,15 +33,15 @@ def create_db_session(db_url=None):
             engine_args = get_engine_args()
             
             # 🔍 添加详细的数据库连接诊断日志
-            logger.info("🔍 [数据库连接诊断] 开始创建数据库连接")
-            logger.info(f"🔍 [数据库连接诊断] 连接URL: {db_url.replace(db_url.split('@')[1].split(':')[0], '***') if '@' in db_url else db_url}")
-            logger.info(f"🔍 [数据库连接诊断] 引擎参数: {engine_args}")
-            
+            logger.debug("🔍 [数据库连接诊断] 开始创建数据库连接")
+            logger.debug(f"🔍 [数据库连接诊断] 连接URL: {db_url.replace(db_url.split('@')[1].split(':')[0], '***') if '@' in db_url else db_url}")
+            logger.debug(f"🔍 [数据库连接诊断] 引擎参数: {engine_args}")
+
             # 测试基本连接
             try:
                 test_engine = create_engine(db_url, connect_args={'connect_timeout': 10})
                 with test_engine.connect() as test_conn:
-                    logger.info("✅ [数据库连接诊断] 基本连接测试成功")
+                    logger.debug("✅ [数据库连接诊断] 基本连接测试成功")
             except Exception as test_e:
                 logger.error(f"❌ [数据库连接诊断] 基本连接测试失败: {test_e}")
                 raise test_e
@@ -51,18 +51,18 @@ def create_db_session(db_url=None):
             # 测试连接池
             try:
                 with engine.connect() as conn:
-                    logger.info("✅ [数据库连接诊断] 连接池测试成功")
+                    logger.debug("✅ [数据库连接诊断] 连接池测试成功")
             except Exception as pool_e:
                 logger.error(f"❌ [数据库连接诊断] 连接池测试失败: {pool_e}")
                 raise pool_e
         else:
-            logger.info(f"🔍 [数据库连接诊断] 使用自定义URL: {db_url}")
+            logger.debug(f"🔍 [数据库连接诊断] 使用自定义URL: {db_url}")
             engine = create_engine(db_url)
 
         Base.metadata.bind = engine
         Session = sessionmaker(bind=engine)
         session = Session()
-        logger.info("✅ [数据库连接诊断] 会话创建成功")
+        logger.debug("✅ [数据库连接诊断] 会话创建成功")
         return session
         
     except SQLAlchemyError as e:

@@ -309,7 +309,7 @@ class BanDetector:
                     if len(self.proxy_status[proxy]['banned_instances']) == 0:
                         self.proxy_status[proxy]['status'] = 'recovering'
 
-                self.logger.info(f"✅ 实例 {instance_id} 封禁期已过，可以重新使用")
+                self.logger.debug(f"✅ 实例 {instance_id} 封禁期已过，可以重新使用")
                 return False
 
             return False
@@ -357,7 +357,7 @@ class BanDetector:
             if instance_id in self.browser_instances:
                 # 移除旧实例
                 old_instance = self.browser_instances.pop(instance_id)
-                self.logger.info(f"🔄 实例 {instance_id} 已被替换为 {new_instance_id}")
+                self.logger.debug(f"🔄 实例 {instance_id} 已被替换为 {new_instance_id}")
 
             # 注册新实例
             self.register_browser_instance(new_instance_id, new_proxy)

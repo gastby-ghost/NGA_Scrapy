@@ -120,7 +120,7 @@ class CookieManager:
     def load(self, cookies_file: str = 'cookies.txt') -> Optional[List[Dict]]:
         """加载并预处理cookies"""
         if not os.path.exists(cookies_file):
-            self.logger.info(f"Cookies file not found: {cookies_file}")
+            self.logger.debug(f"Cookies file not found: {cookies_file}")
             return None
 
         try:
@@ -297,7 +297,7 @@ class PageFetcher:
                 except:
                     pass
             self._active_pages.clear()
-            self.logger.info("All cached pages closed")
+            self.logger.debug("All cached pages closed")
 
     def save_html_debug_file(self, content: str, url: str, reason: str = ""):
         """保存HTML页面到调试文件"""
@@ -330,7 +330,7 @@ class PageFetcher:
                 f.write(debug_header)
                 f.write(content)
 
-            self.logger.info(f"💾 [DEBUG] HTML已保存: {filepath}")
+            self.logger.debug(f"💾 [DEBUG] HTML已保存: {filepath}")
             return filepath
         except Exception as e:
             self.logger.error(f"❌ [DEBUG] 保存HTML失败: {e}")
@@ -453,9 +453,9 @@ class PlaywrightWorker:
     def _playwright_worker_loop(self):
         """Playwright工作线程主循环"""
         try:
-            self.logger.info("Initializing Playwright worker...")
+            self.logger.debug("Initializing Playwright worker...")
             self._playwright = self._create_browser_pool()
-            self.logger.info(f"Browser pool initialized: {len(self._browser_pool)} instances")
+            self.logger.debug(f"Browser pool initialized: {len(self._browser_pool)} instances")
 
             # 通知初始化完成
             self._initialized.set()
@@ -476,7 +476,7 @@ class PlaywrightWorker:
                     current_time = time.time()
                     if current_time - last_queue_check > 10:  # 每10秒记录一次
                         queue_size = self._task_queue.qsize()
-                        self.logger.info(f"📊 [工作线程诊断] 任务队列大小: {queue_size}")
+                        self.logger.debug(f"📊 [工作线程诊断] 任务队列大小: {queue_size}")
                         last_queue_check = current_time
 
                     task_start = time.time()
@@ -510,19 +510,19 @@ class PlaywrightWorker:
                     self.logger.error(f"Worker error: {e}")
 
             # 清理资源
-            self.logger.info("🛑 [诊断] 开始关闭浏览器实例...")
-            self.logger.info(f"🛑 [诊断] 当前线程ID: {threading.get_ident()}")
-            self.logger.info(f"🛑 [诊断] 浏览器池大小: {len(self._browser_pool)}")
-            
+            self.logger.debug("🛑 [诊断] 开始关闭浏览器实例...")
+            self.logger.debug(f"🛑 [诊断] 当前线程ID: {threading.get_ident()}")
+            self.logger.debug(f"🛑 [诊断] 浏览器池大小: {len(self._browser_pool)}")
+
             # 【解决方案】更安全的浏览器实例关闭逻辑
             for i, (browser, context) in enumerate(self._browser_pool):
                 try:
-                    self.logger.info(f"🛑 [解决方案] 关闭浏览器实例 {i}/{len(self._browser_pool)}")
-                    
+                    self.logger.debug(f"🛑 [解决方案] 关闭浏览器实例 {i}/{len(self._browser_pool)}")
+
                     # 【解决方案】先关闭所有页面，避免上下文关闭时的冲突
                     try:
                         pages = context.pages
-                        self.logger.info(f"🛑 [解决方案] 关闭实例 {i} 的 {len(pages)} 个页面...")
+                        self.logger.debug(f"🛑 [解决方案] 关闭实例 {i} 的 {len(pages)} 个页面...")
                         for page in pages:
                             # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
                             with ErrorSuppressor(self.logger):
@@ -541,8 +541,8 @@ class PlaywrightWorker:
                     
                     # 【解决方案】增加延迟，让greenlet有时间完成切换
                     time.sleep(0.2)
-                    
-                    self.logger.info(f"🛑 [解决方案] 关闭上下文...")
+
+                    self.logger.debug(f"🛑 [解决方案] 关闭上下文...")
                     # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
                     with ErrorSuppressor(self.logger):
                         try:
@@ -556,13 +556,13 @@ class PlaywrightWorker:
                     
                     # 【解决方案】再次增加延迟
                     time.sleep(0.2)
-                    
-                    self.logger.info(f"🛑 [解决方案] 关闭浏览器...")
+
+                    self.logger.debug(f"🛑 [解决方案] 关闭浏览器...")
                     # 【根本解决方案】使用错误抑制器完全消除greenlet错误输出
                     with ErrorSuppressor(self.logger):
                         try:
                             browser.close()
-                            self.logger.info(f"✅ [解决方案] 浏览器实例 {i} 关闭成功")
+                            self.logger.debug(f"✅ [解决方案] 浏览器实例 {i} 关闭成功")
                             
                             # 【解决方案】在浏览器实例之间增加延迟，确保完全关闭
                             if i < len(self._browser_pool) - 1:  # 不是最后一个实例
@@ -583,7 +583,7 @@ class PlaywrightWorker:
                     # 【解决方案】改进greenlet错误处理
                     if 'greenlet' in error_type.lower():
                         self.logger.warning(f"🟡 [解决方案] 检测到greenlet错误，这通常是Playwright关闭时的正常现象")
-                        self.logger.info(f"🟡 [解决方案] greenlet错误不会影响功能，继续关闭其他实例...")
+                        self.logger.debug(f"🟡 [解决方案] greenlet错误不会影响功能，继续关闭其他实例...")
                         import traceback
                         self.logger.debug(f"🟡 [解决方案] greenlet错误详情:\n{traceback.format_exc()}")
                     else:
@@ -613,7 +613,7 @@ class PlaywrightWorker:
                     else:
                         self.logger.error(f"❌ [解决方案] 非greenlet错误停止Playwright: {e}")
 
-            self.logger.info("✅ [解决方案] Playwright worker stopped")
+            self.logger.debug("✅ [解决方案] Playwright worker stopped")
 
         except Exception as e:
             self.logger.error(f"Playwright worker failed: {e}")
@@ -657,33 +657,33 @@ class PlaywrightWorker:
 
     def shutdown(self, timeout: int = 10):
         """关闭工作线程"""
-        self.logger.info("🛑 [诊断] 开始关闭 Playwright worker...")
-        self.logger.info(f"🛑 [诊断] 当前线程ID: {threading.get_ident()}")
-        self.logger.info(f"🛑 [诊断] 工作线程数量: {len(self._workers)}")
-        
+        self.logger.debug("🛑 [诊断] 开始关闭 Playwright worker...")
+        self.logger.debug(f"🛑 [诊断] 当前线程ID: {threading.get_ident()}")
+        self.logger.debug(f"🛑 [诊断] 工作线程数量: {len(self._workers)}")
+
         # 【解决方案】先设置停止标志，然后等待工作线程自然结束
         self._stop_event.set()
-        
+
         # 【解决方案】给工作线程更多时间完成当前任务，避免强制中断
-        self.logger.info("🛑 [解决方案] 等待工作线程完成当前任务...")
+        self.logger.debug("🛑 [解决方案] 等待工作线程完成当前任务...")
         time.sleep(2)  # 给工作线程2秒时间完成当前任务
-        
+
         # 【诊断日志】记录每个工作线程的状态
         for i, worker in enumerate(self._workers):
-            self.logger.info(f"🛑 [诊断] 等待工作线程 {i} (ID: {worker.ident}) 退出...")
+            self.logger.debug(f"🛑 [诊断] 等待工作线程 {i} (ID: {worker.ident}) 退出...")
             if worker.is_alive():
-                self.logger.info(f"🛑 [诊断] 工作线程 {i} 仍在运行，等待加入...")
+                self.logger.debug(f"🛑 [诊断] 工作线程 {i} 仍在运行，等待加入...")
             else:
-                self.logger.info(f"🛑 [诊断] 工作线程 {i} 已停止")
-                
+                self.logger.debug(f"🛑 [诊断] 工作线程 {i} 已停止")
+
             worker.join(timeout=timeout)
-            
+
             if worker.is_alive():
                 self.logger.warning(f"🛑 [诊断] 工作线程 {i} 仍在运行，可能未正确关闭")
             else:
-                self.logger.info(f"🛑 [诊断] 工作线程 {i} 已成功关闭")
+                self.logger.debug(f"🛑 [诊断] 工作线程 {i} 已成功关闭")
 
-        self.logger.info("✅ [诊断] Playwright worker shutdown 完成")
+        self.logger.debug("✅ [诊断] Playwright worker shutdown 完成")
 
 
 # ========== 浏览器池 ==========
