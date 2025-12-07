@@ -298,7 +298,7 @@ class PlaywrightWorker:
             }
 
             if self.proxy_manager:
-                proxy_dict = self.proxy_manager.get_random_proxy()
+                proxy_dict = self.proxy_manager.get_random_proxy(mark_used=False)
                 if proxy_dict and proxy_dict.get('proxy'):
                     proxy_server = proxy_dict['proxy']
                     proxy_config = {
@@ -699,7 +699,7 @@ class PlaywrightMiddleware:
                 proxy_addr = None
                 if self.proxy_manager:
                     try:
-                        proxy_dict = self.proxy_manager.get_random_proxy()
+                        proxy_dict = self.proxy_manager.get_random_proxy(mark_used=False)
                         proxy_addr = proxy_dict.get('proxy') if proxy_dict else None
                     except:
                         pass
@@ -734,7 +734,7 @@ class PlaywrightMiddleware:
                 proxy_addr = None
                 if self.proxy_manager:
                     try:
-                        proxy_dict = self.proxy_manager.get_random_proxy()
+                        proxy_dict = self.proxy_manager.get_random_proxy(mark_used=False)
                         proxy_addr = proxy_dict.get('proxy') if proxy_dict else None
                     except:
                         pass

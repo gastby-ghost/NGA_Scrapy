@@ -131,13 +131,14 @@ class ProxyManager:
                 self.logger.info(f"✅ 成功获取 {len(proxies)} 个代理 (总计获取: {self.stats['total_fetched']} 次)")
                 return self.proxy_pool
             else:
+                # 未获取到代理，保留现有代理池
                 self.stats['total_failed'] += 1
-                self.logger.warning("⚠️ 未获取到任何代理，使用现有代理池")
+                self.logger.warning("⚠️ 未获取到任何代理，保留现有代理池")
                 return self.proxy_pool if self.proxy_pool else []
         except Exception as e:
             self.stats['total_failed'] += 1
             self.stats['last_error'] = str(e)
-            self.logger.error(f"❌ 获取代理失败: {str(e)}")
+            self.logger.error(f"❌ 获取代理失败，保留现有代理池: {str(e)}")
             return self.proxy_pool if self.proxy_pool else []
 
     def _fetch_proxies_from_api(self) -> Optional[List[str]]:
@@ -254,9 +255,13 @@ class ProxyManager:
 
         return None
 
-    def get_random_proxy(self) -> Optional[Dict]:
+    def get_random_proxy(self, mark_used: bool = True) -> Optional[Dict]:
         """
         获取一个随机代理（带认证信息）
+
+        Args:
+            mark_used: 是否标记代理为已使用（用于请求时），默认True
+                       浏览器池初始化时可以设为False以避免过早标记
 
         Returns:
             代理字典，包含proxy（ip:port）、username、password等字段
@@ -287,8 +292,9 @@ class ProxyManager:
         # 随机选择一个代理
         proxy_str = random.choice(available_proxies)
 
-        # 标记为已使用
-        self._used_proxies.add(proxy_str)
+        # 只有在需要时，才标记为已使用
+        if mark_used:
+            self._used_proxies.add(proxy_str)
 
         # 解析代理格式：ip:port 或 ip:port,username,password
         proxy_dict = self._parse_proxy_string(proxy_str)
