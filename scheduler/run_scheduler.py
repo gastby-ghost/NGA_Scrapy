@@ -496,11 +496,18 @@ def send_statistics_report():
             logger.warning("未能收集到统计数据")
             return
 
-        # 发送邮件
-        success = email_notifier.send_statistics_report(stats)
+        # 提取趋势数据
+        trend_data = stats.get('trend_data', {})
+
+        # 发送邮件（包含趋势数据）
+        success = email_notifier.send_statistics_report(stats, trend_data=trend_data)
 
         if success:
             logger.info("统计报告已发送")
+            if trend_data.get('has_trend', False):
+                logger.info(f"趋势分析: 项目{trend_data.get('items_trend')}, "
+                           f"成功率{trend_data.get('success_trend')}, "
+                           f"性能{trend_data.get('performance_trend')}")
         else:
             logger.error("发送统计报告失败")
 
