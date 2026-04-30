@@ -221,7 +221,7 @@ class NgaSpider(scrapy.Spider):
         """两阶段主题列表解析：阶段1-收集所有主题信息"""
         # 解析主题列表
         page = response.meta.get('page', 'unknown')
-        self.logger.info(f"📝 开始解析第 {page} 页主题列表 (URL: {response.url})")
+        self.logger.debug(f"📝 开始解析第 {page} 页主题列表 (URL: {response.url})")
 
         # 🔍 [DEBUG] 添加详细的页面信息
         content_length = len(response.text)
@@ -243,7 +243,7 @@ class NgaSpider(scrapy.Spider):
 
         # 查找主题行
         rows = response.xpath('//*[contains(@class, "topicrow")]')
-        self.logger.info(f"📊 第 {page} 页主题列表共找到 {len(rows)} 个主题")
+        self.logger.debug(f"📊 第 {page} 页主题列表共找到 {len(rows)} 个主题")
 
         # 阶段1: 收集所有主题信息
         topics_data = self._collect_topics_from_page(rows, page)
@@ -502,7 +502,7 @@ class NgaSpider(scrapy.Spider):
         for i, (tid, topic_info, db_last_reply) in enumerate(topics_to_crawl):
             # 每生成8个请求暂停0.5秒（与并发数匹配），让Scrapy有时间处理
             if i > 0 and i % 8 == 0:
-                self.logger.info(f"⏱️ [节流] 已生成{i}/{total_count}个请求，暂停0.5秒让调度器处理...")
+                self.logger.debug(f"⏱️ [节流] 已生成{i}/{total_count}个请求，暂停0.5秒让调度器处理...")
                 time.sleep(0.5)
             # 生成TopicItem
             topic_item = TopicItem(
@@ -764,7 +764,7 @@ class NgaSpider(scrapy.Spider):
                 # 查询性能统计
                 avg_query_time = total_elapsed / query_count if query_count > 0 else 0
 
-                self.logger.info(
+                self.logger.debug(
                     f"🗄️ [DB性能统计] 未缓存查询: {len(uncached_tids)}个主题, "
                     f"分{query_count}批, 总耗时{total_elapsed:.3f}s, "
                     f"平均每批{avg_query_time:.3f}s"
@@ -780,7 +780,7 @@ class NgaSpider(scrapy.Spider):
                 # 每1000个主题的性能报告
                 if len(uncached_tids) >= 1000:
                     throughput = len(uncached_tids) / total_elapsed if total_elapsed > 0 else 0
-                    self.logger.info(
+                    self.logger.debug(
                         f"📊 [性能报告] 查询吞吐量: {throughput:.1f} 主题/秒 "
                         f"({len(uncached_tids)}个主题 / {total_elapsed:.3f}s)"
                     )
@@ -788,7 +788,7 @@ class NgaSpider(scrapy.Spider):
         # 第三步：汇总统计信息
         cache_hit_rate = (cached_count / total_tids * 100) if total_tids > 0 else 0
 
-        self.logger.info(
+        self.logger.debug(
             f"🎯 [查询策略] 使用策略: {query_strategy}, "
             f"缓存命中: {cached_count}/{total_tids} ({cache_hit_rate:.1f}%), "
             f"数据库查询: {db_query_count}批次, "
