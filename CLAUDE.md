@@ -141,3 +141,17 @@ sqlite3 nga.db ".tables"
 - `statistics_report_interval_days`: Report frequency (default: 3)
 - `consecutive_failures_threshold`: Alert after N failures (default: 3)
 - `spider_timeout_minutes`: Timeout threshold (default: 60)
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
