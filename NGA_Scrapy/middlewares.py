@@ -430,7 +430,7 @@ class PlaywrightWorker:
             }
 
             if self.proxy_manager:
-                proxy_dict = self.proxy_manager.get_random_proxy(mark_used=False)
+                proxy_dict = self.proxy_manager.get_random_proxy(mark_used=True)
                 if proxy_dict and proxy_dict.get('proxy'):
                     proxy_server = proxy_dict['proxy']
                     proxy_config = {
@@ -889,7 +889,7 @@ class PlaywrightMiddleware:
             for attempt in range(3):
                 try:
                     # 【诊断日志】记录页面获取开始
-                    self.logger.info(f"🚀 [页面获取] 开始获取页面: {request.url[:80]}... (浏览器实例: {browser_index}, 尝试: {attempt + 1}/3)")
+                    self.logger.debug(f"🚀 [页面获取] 开始获取页面: {request.url[:80]}... (浏览器实例: {browser_index}, 尝试: {attempt + 1}/3)")
                     
                     start_time = time.time()
                     result = self.browser_pool.fetch_page(
@@ -902,8 +902,8 @@ class PlaywrightMiddleware:
                     if self.instance_manager:
                         self.instance_manager.report_success(browser_index, response_time)
 
-                    self.logger.info(f"✅ [页面获取成功] {request.url[:80]}... ({response_time:.2f}s)")
-                    self.logger.info(f"  🔍 [DEBUG] 内容长度: {result.get('content_length', 0)} 字符")
+                    self.logger.debug(f"✅ [页面获取成功] {request.url[:80]}... ({response_time:.2f}s)")
+                    self.logger.debug(f"  🔍 [DEBUG] 内容长度: {result.get('content_length', 0)} 字符")
 
                     # 创建响应对象
                     response = scrapy.http.HtmlResponse(

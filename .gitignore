@@ -80,3 +80,5 @@ scheduler/email_config.yaml
 scheduler/stats
 .scrapy
 proxy_config.json
+debug_html/
+archive/
