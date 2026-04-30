@@ -199,12 +199,12 @@ def export_database(config, tmp_dir):
 # 5. 生成元信息
 # ============================================================
 
-def create_export_info(db_file, method, config, has_images, has_archive):
+def create_export_info(db_file, method, database_name, has_images, has_archive):
     """生成 export_info.json"""
     info = {
         'export_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'export_method': method,
-        'database': config['database'],
+        'database': database_name,
         'contents': {
             'database': db_file.name,
         },
