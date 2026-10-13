@@ -45,8 +45,10 @@ class BaseMonitor:
         self.request_interval = float(pol['request_interval_sec'])
         self.request_budget = int(pol['budget_per_round'])
         self.timeout = float(pol['timeout_sec'])
+        self.max_round_seconds = float(pol.get('max_round_seconds', 600))
         self._used = 0
         self._last_request = 0.0
+        self._round_deadline = float('inf')
         self.stats = {'requests': 0, 'units_written': 0, 'new_threads': 0, 'refreshed': 0, 'errors': 0}
 
         self.session = requests.Session()
@@ -59,7 +61,7 @@ class BaseMonitor:
     # ---------- 礼貌访问 ----------
 
     def fetch_json(self, url, params=None):
-        if self._used >= self.request_budget:
+        if self._used >= self.request_budget or time.monotonic() > self._round_deadline:
             raise BudgetExceeded()
         wait = self.request_interval - (time.monotonic() - self._last_request)
         if wait > 0:
@@ -168,6 +170,7 @@ class BaseMonitor:
 
     def run(self):
         t0 = time.monotonic()
+        self._round_deadline = t0 + self.max_round_seconds
         logger.info(f'[{self.platform}] 监测轮开始')
         try:
             self.discover()

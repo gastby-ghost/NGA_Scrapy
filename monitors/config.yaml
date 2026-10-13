@@ -2,6 +2,7 @@
 politeness:
   request_interval_sec: 1.0    # 同一监测轮内两次网络请求的最小间隔（礼貌节流）
   budget_per_round: 300        # 每平台每轮请求预算；超出则提前结束，下轮从断点继续
+  max_round_seconds: 600       # 每平台每轮时长上限（防网络异常拖死监测轮）
   timeout_sec: 15
 
 duration_days: null            # 监测窗口（天）；null = 持续运行。到期后监测轮自动跳过（NGA 采集不受影响）

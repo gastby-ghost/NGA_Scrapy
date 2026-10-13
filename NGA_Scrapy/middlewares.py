@@ -440,10 +440,14 @@ class ErrorSuppressor:
         sys.stderr = StringIO()
         
         # 如果有logger，也临时提高日志级别
+        # 注意（2026-10-14 修复）：scrapy 传入的是 SpiderLoggerAdapter，没有 .level 属性——
+        # 原实现直接取 .level 会 AttributeError，导致 with 体内的 close() 从未执行
+        # （每轮刷 2 行 ERROR，浏览器上下文只能靠进程退出兜底回收）。改为安全获取。
         if self.logger:
-            self.original_loglevel = self.logger.level
-            self.logger.setLevel(logging.CRITICAL + 1)  # 只显示CRITICAL以上的日志
-            
+            self.original_loglevel = getattr(self.logger, 'level', None)
+            if self.original_loglevel is not None:
+                self.logger.setLevel(logging.CRITICAL + 1)  # 只显示CRITICAL以上的日志
+
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
