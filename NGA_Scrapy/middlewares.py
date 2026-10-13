@@ -56,6 +56,18 @@ READ_HTTP_FASTPATH = True
 ANTIBOT_KEYWORDS = ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证', '<title>未登录']
 
 
+def is_read_page(url: str) -> bool:
+    """是否帖子页（read.php）。
+
+    **不可用 `'read.php' in url` 子串判断**——`thread.php` 含子串 "hread.php" 会被误判，
+    列表页被当帖子页取原始体后，postdate 只剩 unix 时间戳文本、无 title 属性，
+    topic 的 post_time/last_reply_date 全落 now() 兜底（2026-10-13 晚实发生过）。
+    以 URL 路径精确判定。
+    """
+    from urllib.parse import urlparse
+    return urlparse(url).path.endswith('/read.php')
+
+
 # ========== 工具类 ==========
 class PerformanceStats:
     """简化的性能统计工具类"""
@@ -260,7 +272,7 @@ class PageFetcher:
             page.set_extra_http_headers({'Referer': referer})
 
             # read.php HTTP 快路径（2026-10-13 性能优化）——说明见模块顶部常量
-            if READ_HTTP_FASTPATH and 'read.php' in url:
+            if READ_HTTP_FASTPATH and is_read_page(url):
                 fast_start = time.time()
                 try:
                     r = context.request.get(url, headers={'Referer': referer},
@@ -297,7 +309,7 @@ class PageFetcher:
             #   （翻页总页数在 __PAGE 脚本里，spider 已适配）。
             # · 其余页型（thread.php 列表页等）→ DOM 快照：列表页时间字段
             #   （postdate/replydate 的 title/text）由 JS 填充，原始体里只有 unix 时间戳。
-            want_raw = 'read.php' in url
+            want_raw = is_read_page(url)
             page_content, content_source = None, "dom_snapshot"
             if want_raw and nav_response is not None:
                 try:
