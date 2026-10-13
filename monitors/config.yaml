@@ -1,0 +1,31 @@
+# 多平台监测配置（2026-10-13 落地：长期实时监测，对论坛低影响、对本地省性能）
+politeness:
+  request_interval_sec: 1.0    # 同一监测轮内两次网络请求的最小间隔（礼貌节流）
+  budget_per_round: 300        # 每平台每轮请求预算；超出则提前结束，下轮从断点继续
+  timeout_sec: 15
+
+duration_days: null            # 监测窗口（天）；null = 持续运行。到期后监测轮自动跳过（NGA 采集不受影响）
+
+platforms:
+  hn:
+    enabled: true
+    min_points: 50             # 发现门槛：故事分数
+    min_comments: 20           # 入追踪门槛：评论数
+    discover_lookback_hours: 12
+    max_new_per_round: 10      # 每轮最多新入追踪的帖（低影响护栏）
+    max_tracking: 60           # 追踪清单上限（满则本轮只刷新，等待冷却腾位）
+    active_hours: 48           # 帖内 48h 无新楼 → cooled（HN 帖冷却极快）
+    min_refresh_gap_min: 25    # 同一帖两次刷新最小间隔（分钟）
+  discourse:
+    enabled: true
+    instances:
+      - name: emacs-china
+        base_url: "https://emacs-china.org"
+        min_posts: 20          # 入追踪门槛：帖内楼数
+      - name: appinn
+        base_url: "https://meta.appinn.net"
+        min_posts: 20
+    max_new_per_round: 5
+    max_tracking: 40
+    active_hours: 48
+    min_refresh_gap_min: 25

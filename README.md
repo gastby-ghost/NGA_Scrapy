@@ -1,6 +1,6 @@
 # NGA_Scrapy
 
-一个基于Scrapy的NGA论坛（bbs.nga.cn）水区爬虫，专为云服务器优化，支持PostgreSQL数据库、增量爬取、浏览器自动化和定时执行。
+一个基于Scrapy的NGA论坛（bbs.nga.cn）水区爬虫，专为云服务器优化，支持PostgreSQL数据库、增量爬取、浏览器自动化和定时执行。自 2026-10-13 起同时承载**多平台监测器**（Hacker News、Discourse 实例）：轻量 HTTP 轮询写入统一记录表 `post`，用于论坛回复行为的跨平台对照研究。
 
 ## ✨ 主要特性
 
@@ -13,6 +13,7 @@
 - **定时执行**: APScheduler可配置间隔执行
 - **邮件通知**: 自动发送统计报告和错误告警
 - **代理支持**: 内置代理轮换功能
+- **多平台监测**: HN / Discourse 低影响轮询（请求节流 + 每轮预算），写入统一记录表 `post`
 
 ## 🚀 快速开始
 
@@ -191,8 +192,16 @@ NGA_Scrapy/
 │   ├── run_scheduler.py         # 调度器守护进程
 │   ├── email_notifier.py        # 邮件通知模块
 │   └── email_config.yaml        # 邮件配置
+├── monitors/                 # 多平台监测器（HN / Discourse）
+│   ├── run.py                   # 监测轮入口（调度器每 30 分钟调用）
+│   ├── base.py                  # 礼貌访问（节流+预算）与统一落库
+│   ├── hn.py                    # Hacker News（Algolia 全树）
+│   ├── discourse.py             # Discourse 实例（print=true 全楼）
+│   ├── nga_sync.py              # reply → post 增量同步
+│   └── config.yaml              # 平台门槛 / 礼貌参数 / 监测窗口
 ├── database_config.py          # PostgreSQL配置
-├── init_db.py                  # 数据库初始化
+├── init_db.py                  # 数据库初始化（⚠️ 会 drop 重建全部表）
+├── create_monitor_tables.py    # 只建缺失的新表（post/monitor_thread），不动既有数据
 ├── run_postgresql.sh           # PostgreSQL启动脚本
 ├── settings_cloud.py           # 云服务器优化配置
 ├── get_cookies.py              # Cookie获取工具
@@ -236,6 +245,13 @@ NGA_Scrapy/
 - **进程锁机制**: 防止并发爬虫实例冲突
 - **超时检测**: 自动清理超时进程
 - **Screen集成**: 支持后台运行管理
+
+### 多平台监测器 (monitors/)
+- **统一记录表**: 所有平台写入 `post`（分析层唯一读取入口）；NGA 数据经 `nga_sync.py` 从 reply 表增量同步（反连接、幂等）
+- **HN** (`hn.py`): Algolia `search_by_date` 发现（1 请求，自带评论数）+ `items/{id}` 全树（1 请求/帖）
+- **Discourse** (`discourse.py`): `latest.json` 发现 + `/t/{id}.json?print=true` 全楼（1 请求/帖）；实例列表在 `config.yaml` 配置
+- **低影响设计**: 请求最小间隔 + 每轮请求预算 + 声明研究身份的 UA + 只拉增量；追踪清单上限与冷却窗口（`monitor_thread` 表）
+- **运行**: `venv/bin/python monitors/run.py`（全部）/ `--platform hn`（单平台）/ `--sync-only`（只同步）；调度器每 30 分钟自动执行（与 NGA spider 错峰 3 分钟）
 
 ### 数据库查询优化系统 (utils/)
 - **缓存管理器** (`cache_manager.py`): 多层缓存（本地+Redis），命中率>85%
@@ -832,6 +848,13 @@ python -c "from NGA_Scrapy.utils.ban_detector import BanDetector; detector = Ban
 
 ### reply表
 - rid (主键), tid (外键→topic.tid), parent_rid, content, recommendvalue, poster_id (外键→user.uid), post_time, image_urls (JSON), image_paths (JSON), sampling_time
+
+### post表（统一记录层，2026-10-13）
+- (platform, unit_id) 复合主键；community, thread_id, thread_title, parent_id, parent_carrier (content|structure|none), author, post_time (UTC ISO), content, content_format (ubb|html), recommend, image_urls, source_url, sampled_at, last_seen
+- 跨平台分析只读本表；NGA 行由 `monitors/nga_sync.py` 从 reply 同步
+
+### monitor_thread表（监测清单，2026-10-13）
+- (platform, thread_id) 复合主键；community, title, status (tracking|cooled|done), unit_count, discovered_at, last_fetched_at, last_activity_at
 
 ## 🛠️ 开发指南
 

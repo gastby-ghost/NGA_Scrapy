@@ -320,6 +320,40 @@ def run_spider():
         check_error_alerts(-1, error_output)
 
 
+def run_monitors_job():
+    """多平台监测轮（HN / Discourse + NGA→post 同步）。
+
+    独立子进程执行，与 NGA spider 错峰注册（省性能）；若 NGA spider 正在跑则本轮跳过
+    （避免并发争资源，30 分钟后自然重来）。监测轮本身对目标论坛低影响：
+    请求节流 + 每轮预算，详见 monitors/config.yaml。
+    """
+    if shutdown_requested:
+        logger.info("跳过监测轮（已请求关闭）")
+        return
+    if spider_process and spider_process.poll() is None:
+        logger.info("NGA spider 正在运行，本轮多平台监测跳过（错峰保护）")
+        return
+    try:
+        logger.info("=" * 60)
+        logger.info(f"开始执行多平台监测轮 - {datetime.now()}")
+        proc = subprocess.Popen(
+            [os.path.join(PROJECT_ROOT, 'venv', 'bin', 'python'), 'monitors/run.py'],
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        for line in proc.stdout:
+            line_stripped = line.strip()
+            if line_stripped:
+                logger.info(f"[Monitors] {line_stripped}")
+        return_code = proc.wait()
+        logger.info(f"多平台监测轮结束，返回码: {return_code}")
+    except Exception:
+        logger.exception("多平台监测轮执行失败")
+
+
 def _parse_stats_from_log():
     """从日志文件中解析最新的爬虫统计信息"""
     try:
@@ -588,6 +622,19 @@ if __name__ == '__main__':
         coalesce=True,
         misfire_grace_time=300
     )
+
+    # 多平台监测任务（HN / Discourse + NGA→post 同步）：与 NGA spider 错峰 3 分钟
+    scheduler.add_job(
+        run_monitors_job,
+        'interval',
+        minutes=30,
+        id='monitors_job',
+        next_run_time=datetime.now(tz) + timedelta(minutes=3),
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300
+    )
+    logger.info("多平台监测任务已添加：每 30 分钟一轮（与 NGA spider 错峰 3 分钟）")
 
     # 添加统计报告任务（如果启用）
     if config and config.get('notifications', {}).get('enable_statistics_report', False):

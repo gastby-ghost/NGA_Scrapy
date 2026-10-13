@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NGA_Scrapy is a Scrapy-based web scraper for NGA forum (bbs.nga.cn) that crawls the water zone (fid=-7). It implements incremental crawling to only fetch new content, avoiding duplicates. The project uses Playwright for JavaScript rendering, SQLAlchemy for ORM, and supports scheduled crawling with email notifications.
 
+Since 2026-10-13 it also hosts the **cross-platform monitors** (`monitors/`): lightweight self-contained HTTP pollers for Hacker News and Discourse instances (no browser, no scrapy), designed for long-running low-impact monitoring. All platforms converge into the unified `post` table — the single read entry for analysis; NGA rows are synced in from `reply` via `monitors/nga_sync.py`. A dedicated scheduler job (`monitors_job`, every 30 min, offset +3 min from the NGA spider) drives it.
+
 ## Quick Start
 
 ### Setup
@@ -55,6 +57,16 @@ cd scheduler && python run_scheduler.py
 - **scheduler/run_scheduler.py:1-553** - APScheduler with email notifications
 - **scheduler/email_notifier.py:1-462** - SMTP email system for stats and alerts
 - Statistics saved to `scheduler/stats/spider_stats_*.json`
+- Two jobs: `nga_spider_job` (scrapy subprocess) and `monitors_job` (monitors/run.py subprocess, skipped while the spider runs)
+
+### Monitors (multi-platform, 2026-10-13)
+- **monitors/base.py** - politeness (min request interval + per-round budget + research-identity UA), unified upsert into `post`, `monitor_thread` bookkeeping (tracking/cooled/done)
+- **monitors/hn.py** - Hacker News via Algolia: `search_by_date` discover (1 req, hits carry num_comments) + `items/{id}` full nested tree (1 req/thread)
+- **monitors/discourse.py** - Discourse instances: `/latest.json` discover + `/t/{id}.json?print=true` full thread (1 req/thread); thread/unit ids carry an instance prefix
+- **monitors/nga_sync.py** - `reply` → `post` incremental sync (anti-join, idempotent; NGA time strings → UTC ISO)
+- **monitors/config.yaml** - thresholds, politeness, per-platform tracking caps, duration window
+- Manual run: `venv/bin/python monitors/run.py [--platform hn] [--sync-only]`
+- Table DDL for the new tables: `create_monitor_tables.py` (creates only missing tables — never run `init_db.py`, it drops everything)
 
 ### Configuration
 - **settings.py** - Playwright pool size, timeouts, concurrency
@@ -127,6 +139,8 @@ sqlite3 nga.db ".tables"
 - **user**: uid (PK), name, user_group, prestige, reg_date, history_re_num
 - **topic**: tid (PK), title, poster_id, post_time, re_num, sampling_time, last_reply_date, partition
 - **reply**: rid (PK), tid, parent_rid, content, recommendvalue, poster_id, post_time, image_urls (JSON), image_paths (JSON), sampling_time
+- **post** (unified URB, analysis-layer single read entry): (platform, unit_id) PK; community, thread_id, thread_title, parent_id, parent_carrier (content|structure|none), author, post_time (UTC ISO), content, content_format (ubb|html), recommend, image_urls, source_url, sampled_at, last_seen
+- **monitor_thread**: (platform, thread_id) PK; community, title, status (tracking|cooled|done), unit_count, discovered_at, last_fetched_at, last_activity_at
 
 ## Key Settings
 

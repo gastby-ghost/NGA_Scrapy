@@ -85,3 +85,9 @@ archive/
 # 本地运行运行时文件（2026-10-13）
 scheduler/*.pid
 scheduler/scheduler.stdout.log
+
+# 多平台监测（2026-10-13）：监测窗口起点戳
+monitors/.started_at
+
+# 运行时锁目录（ProcessLock）
+NGA_Scrapy/scheduler/locks/
