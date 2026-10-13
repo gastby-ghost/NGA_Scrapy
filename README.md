@@ -196,7 +196,7 @@ NGA_Scrapy/
 │   ├── run.py                   # 监测轮入口（调度器每 30 分钟调用）
 │   ├── base.py                  # 礼貌访问（节流+预算）与统一落库
 │   ├── hn.py                    # Hacker News（Algolia 全树）
-│   ├── discourse.py             # Discourse 实例（print=true 全楼）
+│   ├── discourse.py             # Discourse 实例（普通 json + posts.json 批量补齐）
 │   ├── nga_sync.py              # reply → post 增量同步
 │   └── config.yaml              # 平台门槛 / 礼貌参数 / 监测窗口
 ├── database_config.py          # PostgreSQL配置
@@ -249,7 +249,7 @@ NGA_Scrapy/
 ### 多平台监测器 (monitors/)
 - **统一记录表**: 所有平台写入 `post`（分析层唯一读取入口）；NGA 数据经 `nga_sync.py` 从 reply 表增量同步（反连接、幂等）
 - **HN** (`hn.py`): Algolia `search_by_date` 发现（1 请求，自带评论数）+ `items/{id}` 全树（1 请求/帖）
-- **Discourse** (`discourse.py`): `latest.json` 发现 + `/t/{id}.json?print=true` 全楼（1 请求/帖）；实例列表在 `config.yaml` 配置
+- **Discourse** (`discourse.py`): `latest.json` 发现 + `/t/{id}.json`（首尾各约 20 楼）＋ `/t/{id}/posts.json?post_ids[]` 批量补齐；实例列表在 `config.yaml` 配置。`?print=true` 已弃用（Discourse 对 print 视图单独严格限速，2026-10-14 实测连续 422）
 - **低影响设计**: 请求最小间隔 + 每轮请求预算 + 声明研究身份的 UA + 只拉增量；追踪清单上限与冷却窗口（`monitor_thread` 表）
 - **运行**: `venv/bin/python monitors/run.py`（全部）/ `--platform hn`（单平台）/ `--sync-only`（只同步）；调度器每 30 分钟自动执行（与 NGA spider 错峰 3 分钟）
 

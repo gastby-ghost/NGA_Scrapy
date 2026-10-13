@@ -19,6 +19,7 @@ platforms:
     min_refresh_gap_min: 25    # 同一帖两次刷新最小间隔（分钟）
   discourse:
     enabled: true
+    request_interval_sec: 2.0  # 覆盖全局：Discourse 匿名限速更紧（1 req/s 实测触发 422「次数过多」）
     instances:
       - name: emacs-china
         base_url: "https://emacs-china.org"

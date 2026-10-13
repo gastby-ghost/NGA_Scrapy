@@ -62,7 +62,7 @@ cd scheduler && python run_scheduler.py
 ### Monitors (multi-platform, 2026-10-13)
 - **monitors/base.py** - politeness (min request interval + per-round budget + research-identity UA), unified upsert into `post`, `monitor_thread` bookkeeping (tracking/cooled/done)
 - **monitors/hn.py** - Hacker News via Algolia: `search_by_date` discover (1 req, hits carry num_comments) + `items/{id}` full nested tree (1 req/thread)
-- **monitors/discourse.py** - Discourse instances: `/latest.json` discover + `/t/{id}.json?print=true` full thread (1 req/thread); thread/unit ids carry an instance prefix
+- **monitors/discourse.py** - Discourse instances: `/latest.json` discover + `/t/{id}.json` (first/last ~20 posts) with `/t/{id}/posts.json?post_ids[]` batch backfill; `?print=true` was dropped 2026-10-14 (Discourse rate-limits the print view separately — constant 422s). Thread/unit ids carry an instance prefix
 - **monitors/nga_sync.py** - `reply` → `post` incremental sync (anti-join, idempotent; NGA time strings → UTC ISO)
 - **monitors/config.yaml** - thresholds, politeness, per-platform tracking caps, duration window
 - Manual run: `venv/bin/python monitors/run.py [--platform hn] [--sync-only]`

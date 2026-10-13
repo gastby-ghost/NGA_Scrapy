@@ -42,8 +42,10 @@ class BaseMonitor:
         self.cfg = config
         self.engine = engine
         pol = config['politeness']
-        self.request_interval = float(pol['request_interval_sec'])
-        self.request_budget = int(pol['budget_per_round'])
+        # 平台可覆盖全局礼貌参数（如 Discourse 匿名限速更紧：2.0s，实测 1s 触发 422 限流）
+        plat_cfg = config['platforms'].get(self.platform, {})
+        self.request_interval = float(plat_cfg.get('request_interval_sec', pol['request_interval_sec']))
+        self.request_budget = int(plat_cfg.get('budget_per_round', pol['budget_per_round']))
         self.timeout = float(pol['timeout_sec'])
         self.max_round_seconds = float(pol.get('max_round_seconds', 600))
         self._used = 0
@@ -131,6 +133,14 @@ class BaseMonitor:
             conn.execute(stmt.on_conflict_do_nothing(index_elements=['platform', 'thread_id']))
         self.stats['new_threads'] += 1
 
+    def mark_thread_done(self, thread_id):
+        """帖子不可达（被删/权限变化）→ 完结，不再追踪"""
+        with self.engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE monitor_thread SET status='done', last_fetched_at=:f
+                WHERE platform=:p AND thread_id=:t
+            """), {'f': utcnow_iso(), 'p': self.platform, 't': str(thread_id)})
+
     def touch_thread(self, thread_id, unit_count, last_activity_at, status='tracking'):
         with self.engine.begin() as conn:
             conn.execute(text("""
@@ -206,6 +216,17 @@ class BaseMonitor:
                 self.stats['refreshed'] += 1
             except BudgetExceeded:
                 break
+            except requests.exceptions.HTTPError as e:
+                code = e.response.status_code if e.response is not None else None
+                if code in (403, 404, 410):
+                    self.mark_thread_done(th['thread_id'])
+                    logger.warning(f"[{self.platform}] 帖子不可达（HTTP {code}），标记 done: {th['thread_id']}")
+                elif code in (422, 429):
+                    self.stats['errors'] += 1
+                    logger.warning(f"[{self.platform}] 被限流（HTTP {code}），本轮跳过: {th['thread_id']}")
+                else:
+                    self.stats['errors'] += 1
+                    logger.exception(f"[{self.platform}] 刷新失败 {th['thread_id']}")
             except Exception:
                 self.stats['errors'] += 1
                 logger.exception(f"[{self.platform}] 刷新失败 {th['thread_id']}")
