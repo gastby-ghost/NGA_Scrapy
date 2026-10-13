@@ -800,6 +800,20 @@ class BrowserPool:
         report = "\n".join([f"{k}: {v}" for k, v in stats.items()])
         self.logger.info(f"Performance stats:\n{report}")
 
+    def save_cookies_if_updated(self, cookie_manager) -> None:
+        """把浏览器上下文的当前 cookies 交 cookie_manager 持久化（会话轮换回写，2026-10-13 接上）。
+
+        Playwright 对象只能在 PlaywrightWorker 线程访问——与 fetch 同规矩。
+        """
+        def _task(browser_pool):
+            pool = browser_pool or []
+            if pool:
+                _, context = pool[0]
+                cookie_manager.save_if_updated(context)
+            return None
+
+        self._playwright_worker.execute(_task)
+
     def close(self):
         """关闭浏览器池"""
         self.logger.info("🛑 [诊断] 开始关闭浏览器池...")
@@ -926,6 +940,13 @@ class PlaywrightMiddleware:
         # 2. 然后关闭浏览器池，此时没有其他线程在操作浏览器
         if self.browser_pool:
             self.logger.info("🛑 [解决方案] 第2步: 关闭浏览器池...")
+            # 会话轮换持久化（2026-10-13 接上；此前 save_if_updated 定义了但从未被调用）：
+            # 若 NGA 在本轮轮换了会话 cookie，回写 cookies.txt 供下一轮使用；失败不影响数据。
+            try:
+                if self.cookie_manager:
+                    self.browser_pool.save_cookies_if_updated(self.cookie_manager)
+            except Exception as e:
+                self.logger.warning(f"Cookie 回写失败（不影响本轮数据）: {e}")
             self.browser_pool.close()
             self.logger.info("✅ [解决方案] 浏览器池关闭完成")
             
