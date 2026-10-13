@@ -3,6 +3,7 @@ import time
 import signal
 import sys
 import logging
+import logging.handlers
 import yaml
 import os
 from datetime import datetime, timedelta
@@ -45,13 +46,13 @@ except ImportError:
         def collect_statistics(self, start_date, end_date):
             return None
 
-# 配置日志
+# 配置日志（2026-10-13 长跑优化：文件轮转、仅文件 handler——nohup 下 stdout 无人看且会与文件
+# 重复记录；早期崩溃输出由启动脚本重定向到 scheduler.stdout.log）
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('scheduler.log'),
-        logging.StreamHandler(sys.stdout)
+        logging.handlers.RotatingFileHandler('scheduler.log', maxBytes=20 * 1024 * 1024, backupCount=3),
     ]
 )
 

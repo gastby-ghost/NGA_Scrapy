@@ -22,7 +22,7 @@ ITEM_PIPELINES = {
 IMAGES_STORE = 'download_images'
 
 
-PLAYWRIGHT_POOL_SIZE = 2  # 减少浏览器池大小，使用单实例多页面模式提高效率
+PLAYWRIGHT_POOL_SIZE = 1  # 2026-10-13：read.php 走 HTTP 快路径后浏览器只服务 thread.php 列表页——1 实例足够，降内存负荷
 DOWNLOAD_TIMEOUT = 30     # 增加超时时间，应对高负载
 
 # 遵守 robots.txt 规则

@@ -29,4 +29,6 @@ class ReplyItem(scrapy.Item):
     post_time = scrapy.Field()
     sampling_time = scrapy.Field()
     image_urls = scrapy.Field()  # 新增图片URL字段
+    images = scrapy.Field()      # ImagesPipeline 结果槽（2026-10-13）：**必须声明**——否则 scrapy
+                                 # item_completed 的设置被 suppress(KeyError) 静默吞掉，image_paths 永远为空
     image_paths = scrapy.Field()      # 新增图片存储信息字段

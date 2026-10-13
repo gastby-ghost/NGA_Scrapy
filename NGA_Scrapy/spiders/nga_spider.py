@@ -104,7 +104,10 @@ import os
 
 class NgaSpider(scrapy.Spider):
     name = 'nga'
-    allowed_domains = ['bbs.nga.cn']
+    # 2026-10-13 启用图片下载：offsite 中间件按 allowed_domains 放行请求——不含图床域会把
+    # 全部图片请求以 IgnoreRequest 拒掉（ImagePipeline FileException 刷屏、零图片落盘）。
+    # 外部图床（微博等）暂不放行，防噪声。
+    allowed_domains = ['bbs.nga.cn', 'nga.cn', 'nga.178.com', 'ngabbs.com']
     start_urls = ['https://bbs.nga.cn/thread.php?fid=-7']
 
     def __init__(self, *args, **kwargs):

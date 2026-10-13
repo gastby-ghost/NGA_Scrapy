@@ -49,6 +49,12 @@ REQUEST_TIMEOUT = 60
 NAV_TIMEOUT = 15000
 LOAD_TIMEOUT = 5000
 
+# read.php HTTP 快路径（2026-10-13 性能优化）：正文页只需服务器原始 HTML（修复后取数
+# 即为原始响应体），无需浏览器渲染——经浏览器上下文的 HTTP 请求（同 cookie/代理/头）
+# 比导航快约一个量级，显著降低本地负荷；命中异常页（登录墙/反爬词）自动回落浏览器导航。
+READ_HTTP_FASTPATH = True
+ANTIBOT_KEYWORDS = ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证', '<title>未登录']
+
 
 # ========== 工具类 ==========
 class PerformanceStats:
@@ -253,6 +259,28 @@ class PageFetcher:
 
             page.set_extra_http_headers({'Referer': referer})
 
+            # read.php HTTP 快路径（2026-10-13 性能优化）——说明见模块顶部常量
+            if READ_HTTP_FASTPATH and 'read.php' in url:
+                fast_start = time.time()
+                try:
+                    r = context.request.get(url, headers={'Referer': referer},
+                                            max_redirects=5, timeout=30000)
+                    if r.ok:
+                        content = decode_nga_html(r.body())
+                        if not any(kw in content for kw in ANTIBOT_KEYWORDS):
+                            fast_time = time.time() - fast_start
+                            self.logger.debug(f"⚡ HTTP 快路径：{fast_time:.2f}s，{len(content)} 字符")
+                            return {
+                                'url': url, 'content': content, 'content_source': 'http_fast',
+                                'success': True, 'nav_time': fast_time,
+                                'content_length': len(content),
+                            }
+                        self.logger.warning("⚠️ HTTP 快路径命中异常页（登录墙/反爬词），回退浏览器导航")
+                    else:
+                        self.logger.warning(f"⚠️ HTTP 快路径状态码 {r.status}，回退浏览器导航")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ HTTP 快路径失败（{str(e)[:60]}），回退浏览器导航")
+
             self.logger.debug(f"Navigating to: {url}")
             nav_start = time.time()
             nav_response = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
@@ -261,13 +289,7 @@ class PageFetcher:
 
             page.wait_for_load_state("domcontentloaded", timeout=LOAD_TIMEOUT)
 
-            # 获取页面内容：优先用**服务器原始响应体**（2026-10-13 修复）。
-            # NGA 前端脚本会把 BBCode 源（[b]Reply to [pid=…] / [s:ac:…] / 行间 <br/>）
-            # 在解析期转换为渲染结构（div.quote / +R by / <img>），JS 打开时 DOM 快照
-            # 拿到的是转换后形态，与存量语料及下游按 [quote]/[pid=] 解析的管线不同形；
-            # 原始响应体是确定性的源文本（翻页信息在 __PAGE 脚本里，spider 已适配）。
-            # 取不到时回退 DOM 快照。
-            # 内容来源按页型分流（2026-10-13 修复）：
+            # 获取页面内容（浏览器导航路径，read.php 快路径未命中时到达）：
             # · read.php（帖子页）→ **服务器原始响应体**：NGA 前端脚本会把 BBCode 源
             #   （[b]Reply to [pid=…] / [s:ac:…] / 行间 <br/>）在解析期转换为渲染结构
             #   （div.quote / +R by / <img>），JS 打开时 DOM 快照与存量语料及下游按
@@ -315,7 +337,7 @@ class PageFetcher:
                 self.save_html_debug_file(page_content, url, "no_nga_content")
 
             # 检查是否有反爬虫提示（含登录墙：cookie 失效/未生效时 NGA 返回 <title>未登录</title> 错误页）
-            if any(keyword in page_content for keyword in ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证', '<title>未登录']):
+            if any(keyword in page_content for keyword in ANTIBOT_KEYWORDS):
                 self.logger.warning(f"⚠️ [DEBUG] 检测到反爬虫或验证页面")
                 self.save_html_debug_file(page_content, url, "anti_bot")
 
@@ -917,13 +939,12 @@ class PlaywrightMiddleware:
                 self.logger.info(self.instance_manager.get_status_report())
             self.last_stat_time = time.time()
 
-        # 跳过图片/媒体请求（走 Scrapy 原生下载器：ImagesPipeline 与 NGA 图片 CDN 无需浏览器）
-        url_l = request.url.lower()
-        if any(url_l.endswith(ext) or (ext + '?') in url_l
-               for ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')):
+        # 非论坛域请求（图片/媒体 CDN 等）一律走 Scrapy 原生下载器——浏览器只服务 bbs.nga.cn。
+        # （2026-10-13：`.gif.mp4` 等媒体曾漏进浏览器导航，DNS 解析失败把唯一实例标记失败、
+        #   全链停摆 30 分钟；域规则比扩展名清单稳健——扩展名总在漏。）
+        if 'bbs.nga.cn' not in request.url:
             # 图床域重写（2026-10-13 实测）：页面里的 img*.nga.178.com 在本网络解析不到（DNS 无记录），
             # 同路径 img*.nga.cn 有效（附件 /attachments/ 与表情 /ngabbs/post/smile/ 两条路径均验证 200）
-            # ——不重写则图片下载全部失败。
             if 'nga.178.com' in request.url:
                 request._set_url(request.url.replace('nga.178.com', 'nga.cn'))
             return None

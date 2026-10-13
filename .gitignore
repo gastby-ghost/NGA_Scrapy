@@ -82,3 +82,6 @@ scheduler/stats
 proxy_config.json
 debug_html/
 archive/
+# 本地运行运行时文件（2026-10-13）
+scheduler/*.pid
+scheduler/scheduler.stdout.log
