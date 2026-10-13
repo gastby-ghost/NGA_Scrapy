@@ -323,16 +323,24 @@ def run_spider():
 def run_monitors_job():
     """多平台监测轮（HN / Discourse + NGA→post 同步）。
 
-    独立子进程执行，与 NGA spider 错峰注册（省性能）；若 NGA spider 正在跑则本轮跳过
-    （避免并发争资源，30 分钟后自然重来）。监测轮本身对目标论坛低影响：
-    请求节流 + 每轮预算，详见 monitors/config.yaml。
+    独立子进程执行，与 NGA spider 错峰注册（省性能）。若 NGA spider 正在跑则**等待其结束**
+    （最多 10 分钟）再执行——2026-10-14 修正：原先「跳过」策略在 spider 轮变长（>3 分钟）时
+    会连续空转、监测轮永远饿死；等待语义保证每 30 分钟必定成轮，仅在 spider 异常长跑时才放弃。
+    监测轮本身对目标论坛低影响：请求节流 + 每轮预算，详见 monitors/config.yaml。
     """
     if shutdown_requested:
         logger.info("跳过监测轮（已请求关闭）")
         return
-    if spider_process and spider_process.poll() is None:
-        logger.info("NGA spider 正在运行，本轮多平台监测跳过（错峰保护）")
-        return
+    wait_start = time.monotonic()
+    logged_wait = False
+    while spider_process and spider_process.poll() is None:
+        if time.monotonic() - wait_start > 600:
+            logger.warning("等待 NGA spider 超过 10 分钟仍未结束，本轮多平台监测放弃（下轮再来）")
+            return
+        if not logged_wait:
+            logger.info("NGA spider 正在运行，等待其结束后执行监测轮（最多 10 分钟）…")
+            logged_wait = True
+        time.sleep(15)
     try:
         logger.info("=" * 60)
         logger.info(f"开始执行多平台监测轮 - {datetime.now()}")
