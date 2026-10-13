@@ -6,7 +6,7 @@
 """
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -53,6 +53,15 @@ def main():
             problems.append(f"NGA 空正文 {empty} 条（提取回归信号）")
         if img_urls - img_paths > 50:
             problems.append(f"有图 URL 未落盘 {img_urls - img_paths} 楼（可跑 backfill_images.py 回填）")
+        if last_batch:
+            try:
+                dt = datetime.strptime(last_batch, '%Y-%m-%d-%H-%M-%S').replace(
+                    tzinfo=timezone(timedelta(hours=8)))
+                mins = (datetime.now(timezone.utc) - dt).total_seconds() / 60
+                if mins > 120:
+                    problems.append(f"NGA 最近采样距今 {mins / 60:.1f} 小时（采集是否停了？查 scheduler.log）")
+            except ValueError:
+                pass
 
         # NGA → post 同步
         nga_post = q("SELECT count(*) FROM post WHERE platform='nga'")
