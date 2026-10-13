@@ -12,6 +12,9 @@ DOWNLOADER_MIDDLEWARES = {
 
 # 配置管道
 ITEM_PIPELINES = {
+    # 图片下载（2026-10-13 启用）：先于入库管线运行，item['images'] 供 image_paths 消费。
+    # 长跑调度注意 IMAGES_STORE 磁盘占用（体量随图片数线性增长）。
+    'scrapy.pipelines.images.ImagesPipeline': 200,
     'NGA_Scrapy.pipelines.NgaPipeline': 300,
 }
 

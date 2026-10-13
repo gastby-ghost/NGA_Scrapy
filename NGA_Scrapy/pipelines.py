@@ -244,9 +244,10 @@ class NgaPipeline:
             post_time=item['post_time'],
             sampling_time=item['sampling_time'],
             image_urls=item.get('image_urls', []),
+            # ImagesPipeline（2026-10-13 启用）的 'images' 为 [{'url','path','checksum'}, …]，取 path 入列
             image_paths=[
-                os.path.join(settings.IMAGES_STORE, path)
-                for path in item.get('images', [])
+                os.path.join(settings.IMAGES_STORE, img['path'])
+                for img in item.get('images', [])
             ] if 'images' in item else []
         )
         self.session.merge(reply)

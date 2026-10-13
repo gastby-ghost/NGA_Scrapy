@@ -86,6 +86,7 @@
 # - 可增加代理支持
 # - 可添加更详细的统计信息
 
+import re
 import scrapy
 from scrapy import Request
 from ..items import TopicItem, ReplyItem, UserItem
@@ -824,13 +825,20 @@ class NgaSpider(scrapy.Spider):
         meta={'tid': tid}
 
         if 'last_page' not in response.meta:
-            last_page_link = response.xpath('//a[contains(@class, "invert") and @title="最后页"]/@href').get()
-            if last_page_link:
-                last_page = int(parse_qs(last_page_link.split('?')[1]).get('page', [1])[0])
-                #self.logger.info(f"最后一页{last_page}获取")
+            # ① 原始响应体里的 __PAGE 脚本含总页数
+            #    （var __PAGE = {0:'基础URL',1:总页数,2:当前页,3:每页条数}）——
+            #    服务器原始体无 DOM 版翻页控件（最后页/invert，JS 生成），此为页数权威来源（2026-10-13）
+            m_page = re.search(r"var __PAGE\s*=\s*\{0:'[^']*',1:(\d+),2:\d+,3:\d+\}", response.text)
+            if m_page:
+                last_page = int(m_page.group(1))
             else:
-                page_links = [int(p.split('=')[-1]) for p in response.xpath('//a[contains(@href, "page=")]/@href').re(r'page=\d+')]
-                last_page = max(page_links) if page_links else 1
+                last_page_link = response.xpath('//a[contains(@class, "invert") and @title="最后页"]/@href').get()
+                if last_page_link:
+                    last_page = int(parse_qs(last_page_link.split('?')[1]).get('page', [1])[0])
+                    #self.logger.info(f"最后一页{last_page}获取")
+                else:
+                    page_links = [int(p.split('=')[-1]) for p in response.xpath('//a[contains(@href, "page=")]/@href').re(r'page=\d+')]
+                    last_page = max(page_links) if page_links else 1
 
             meta['last_page'] = last_page
             meta['current_page'] = last_page
@@ -872,9 +880,8 @@ class NgaSpider(scrapy.Spider):
             poster_id = poster_href.split('uid=')[1].split('&')[0] if poster_href and 'uid=' in poster_href else ''
             poster_name = reply.xpath('.//*[starts-with(@id, "postauthor")]/text()').get()
             
-            content = reply.xpath('.//*[starts-with(@id, "postcontent") '
-                                 'and string-length(translate(substring(@id, 12), "0123456789", "")) = 0]/text()').get()
-            
+            content = self._extract_post_content(reply)
+
             recommendvalue = reply.xpath('.//span[contains(@class,"recommendvalue")]/text()').get('0')
             post_time = reply.xpath('.//*[starts-with(@id, "postdate")]/text()').get()
 
@@ -889,19 +896,10 @@ class NgaSpider(scrapy.Spider):
                 new_page_flag=False
                 continue
             
-            parent_rid = None
-            if reply.xpath('.//div[contains(@class, "quote")]'):
-                quote_link = reply.xpath('.//a[contains(@title, "打开链接")]/@href').get()
-                if quote_link and 'pid=' in quote_link:
-                    parent_rid = quote_link.split('pid=')[1].split('&')[0]
-            
-            # 新增图片URL提取逻辑
-            image_urls = []
-            # 提取所有img标签的src属性（包含data-srcorg备用）
-            for img in reply.xpath('.//img'):
-                src = img.xpath('@src').get()
-                if src and ('attachments' in src or 'smile' in src):
-                    image_urls.append(src)
+            parent_rid = self._extract_parent_rid(reply, content)
+
+            # 图片 URL：正文 BBCode [img]（快照前态）＋ <img> 元素（快照落在 JS 渲染后）
+            image_urls = self._extract_image_urls(reply, content)
 
             reply_item = ReplyItem(
                 rid=post_id,
@@ -942,6 +940,84 @@ class NgaSpider(scrapy.Spider):
             )
         else:
             self.logger.debug(f"✅ 主题 {tid}: 所有回复页处理完成")
+
+    # ── 正文 / 引用 / 图片提取（2026-10-13 修复「只取首文本节点」截断缺陷）─────
+    # 缺陷（坐实于全库扫描＋实页对照）：原实现
+    #   content = reply.xpath('…postcontent…/text()').get()
+    # 只取 postcontent 元素的**第一个**文本节点（＝正文第一行）。NGA 页面的行边界
+    # 是真实 <br> 元素（每行独立文本节点），引用归因头恒独占首行 → 其后（被引正文＋
+    # 自有正文）整体丢失。全库受影响下界 ≈128 万条（27.6%）。
+    # 实页对照（2026-10-13，tid=47702375）：首节点 82 字 vs 全文 274 字。
+    _POSTCONTENT_XPATH = ('.//*[starts-with(@id, "postcontent") '
+                          'and string-length(translate(substring(@id, 12), "0123456789", "")) = 0]')
+    _PID_RE = re.compile(r'\[pid=(\d+),')
+    _IMG_BBCODE_RE = re.compile(r'\[img\](.*?)\[/img\]', re.S)
+    _NGA_ATTACH_BASE = 'https://img.nga.178.com/attachments/'
+
+    def _extract_post_content(self, reply):
+        """提取楼层正文：postcontent 元素下**全部**文本节点，真实 <br> 元素还原为换行。
+
+        按文档顺序遍历 `.//text() | .//br`（XPath 并集保证文档序）；文本节点与元素
+        节点的判据用 `isinstance(node.root, str)`——parsel 的 `.type` 会被父级继承
+        （并集节点的 type 恒为 'html'，不可用，2026-10-13 冒烟坐实的坑）。
+        转义文本里的字面 `<br/>`（引文内嵌 HTML 源）原样保留，不在本层再解释。
+        """
+        els = reply.xpath(self._POSTCONTENT_XPATH)
+        if not els:
+            return None
+        parts = []
+        for node in els[0].xpath('.//text() | .//br'):
+            root = node.root
+            parts.append(str(root) if isinstance(root, str) else '\n')
+        return ''.join(parts)
+
+    def _extract_parent_rid(self, reply, content):
+        """从引用标记解析被回复楼的 rid。
+
+        快照时刻（domcontentloaded）引用多为 BBCode 文本形态
+        （`[b]Reply to [pid=…]` / `[quote][pid=…]`），元素形态（div.quote）几乎不存——
+        旧实现只走路元素，主表 137 万条仅 26 条非空。现优先从正文解析首个 `[pid=…]`；
+        元素路径保留为后备（快照落在 JS 渲染后、引用为 `+R by` 结构时）。
+        """
+        if content:
+            m = self._PID_RE.search(content)
+            if m:
+                return m.group(1)
+        quote_link = reply.xpath('.//a[contains(@title, "打开链接")]/@href').get()
+        if not quote_link:
+            quote_link = reply.xpath('.//div[contains(@class, "quote")]//a/@href').get()
+        if quote_link and 'pid=' in quote_link:
+            return quote_link.split('pid=')[1].split('&')[0]
+        return None
+
+    def _extract_image_urls(self, reply, content):
+        """提取图片 URL（去重保序）。
+
+        ① 正文 BBCode `[img]…[/img]`——快照前态的主要形态；相对路径（`./mon_…`）
+           补全为附件 CDN 绝对地址（`img.nga.178.com/attachments/`）。
+        ② `<img>` 元素 src——快照落在 JS 渲染后时的形态（表情 `smile/`、附件
+           `attachments/`）；过滤 copyChk 占位图（`about:blank`）。
+        """
+        urls = []
+        if content:
+            for raw in self._IMG_BBCODE_RE.findall(content):
+                u = raw.strip()
+                if u.startswith('./'):
+                    u = self._NGA_ATTACH_BASE + u[2:]
+                elif u.startswith('mon_') or u.startswith('-'):
+                    u = self._NGA_ATTACH_BASE + u
+                if u.startswith('http'):
+                    urls.append(u)
+        for img in reply.xpath('.//img'):
+            src = img.xpath('@src').get()
+            if src and src != 'about:blank' and ('attachments' in src or 'smile' in src):
+                urls.append(src)
+        seen, out = set(), []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
 
     # 其他方法保持不变...
     def parse_user(self, response):

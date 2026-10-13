@@ -1,6 +1,7 @@
 import scrapy
 import json
 import os
+import re
 import time
 import threading
 import uuid
@@ -204,6 +205,19 @@ class CookieManager:
 
 
 # ========== 页面获取器 ==========
+def decode_nga_html(body: bytes) -> str:
+    """解码 NGA 响应体（2026-10-13）。
+
+    站点对浏览器 UA 与普通客户端可能分别返回 UTF-8 / GBK（实测：浏览器响应体为
+    UTF-8 而 Content-Type 标 GBK；urllib 版为 GBK）——按内容自适应：先严格 UTF-8，
+    失败再 GB18030。中文长文本下两者不会互相误判。
+    """
+    try:
+        return body.decode('utf-8')
+    except UnicodeDecodeError:
+        return body.decode('gb18030', 'replace')
+
+
 class PageFetcher:
     """页面获取器 - 优化版：单实例多页面复用"""
     def __init__(self, logger):
@@ -241,14 +255,50 @@ class PageFetcher:
 
             self.logger.debug(f"Navigating to: {url}")
             nav_start = time.time()
-            page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            nav_response = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
             nav_time = time.time() - nav_start
             self.logger.debug(f"Navigation complete: {nav_time:.2f}s")
 
             page.wait_for_load_state("domcontentloaded", timeout=LOAD_TIMEOUT)
 
-            # 获取页面内容
-            page_content = page.content()
+            # 获取页面内容：优先用**服务器原始响应体**（2026-10-13 修复）。
+            # NGA 前端脚本会把 BBCode 源（[b]Reply to [pid=…] / [s:ac:…] / 行间 <br/>）
+            # 在解析期转换为渲染结构（div.quote / +R by / <img>），JS 打开时 DOM 快照
+            # 拿到的是转换后形态，与存量语料及下游按 [quote]/[pid=] 解析的管线不同形；
+            # 原始响应体是确定性的源文本（翻页信息在 __PAGE 脚本里，spider 已适配）。
+            # 取不到时回退 DOM 快照。
+            # 内容来源按页型分流（2026-10-13 修复）：
+            # · read.php（帖子页）→ **服务器原始响应体**：NGA 前端脚本会把 BBCode 源
+            #   （[b]Reply to [pid=…] / [s:ac:…] / 行间 <br/>）在解析期转换为渲染结构
+            #   （div.quote / +R by / <img>），JS 打开时 DOM 快照与存量语料及下游按
+            #   [quote]/[pid=] 解析的管线不同形；原始体是确定性的源文本
+            #   （翻页总页数在 __PAGE 脚本里，spider 已适配）。
+            # · 其余页型（thread.php 列表页等）→ DOM 快照：列表页时间字段
+            #   （postdate/replydate 的 title/text）由 JS 填充，原始体里只有 unix 时间戳。
+            want_raw = 'read.php' in url
+            page_content, content_source = None, "dom_snapshot"
+            if want_raw and nav_response is not None:
+                try:
+                    page_content = decode_nga_html(nav_response.body())
+                    content_source = "response_body"
+                except Exception as e:
+                    # 偶发：CDP 侧响应体被丢弃（No resource with given identifier found）——走 HTTP 回退
+                    self.logger.warning(f"⚠️ 原始响应体获取失败（{str(e)[:60]}），改用 HTTP 回退")
+            if want_raw and page_content is None:
+                try:
+                    # HTTP 回退：经浏览器上下文的请求（同 cookie/代理，跟随重定向），同为原始 HTML 形态
+                    r = context.request.get(url, headers={'Referer': referer}, max_redirects=5)
+                    if r.ok:
+                        page_content = decode_nga_html(r.body())
+                        content_source = "request_fallback"
+                except Exception as e:
+                    self.logger.warning(f"⚠️ HTTP 回退失败: {e}")
+            if page_content is None:
+                # DOM 快照：非 read.php 页型的正常路径；read.php 双回退仍失败时的兜底
+                # （JS 渲染后形态，与存量语料不同形，应极少走到）
+                page_content = page.content()
+                if want_raw:
+                    content_source = "dom_fallback"
 
             # 🔍 [DEBUG] 检查页面内容是否异常
             content_length = len(page_content)
@@ -264,14 +314,15 @@ class PageFetcher:
                 self.logger.warning(f"⚠️ [DEBUG] 页面可能未正确加载NGA内容")
                 self.save_html_debug_file(page_content, url, "no_nga_content")
 
-            # 检查是否有反爬虫提示
-            if any(keyword in page_content for keyword in ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证']):
+            # 检查是否有反爬虫提示（含登录墙：cookie 失效/未生效时 NGA 返回 <title>未登录</title> 错误页）
+            if any(keyword in page_content for keyword in ['访问过于频繁', 'IP被封', '验证码', 'captcha', '人机验证', '<title>未登录']):
                 self.logger.warning(f"⚠️ [DEBUG] 检测到反爬虫或验证页面")
                 self.save_html_debug_file(page_content, url, "anti_bot")
 
             return {
                 'url': page.url,
                 'content': page_content,
+                'content_source': content_source,
                 'success': True,
                 'nav_time': nav_time,
                 'content_length': content_length
@@ -866,8 +917,15 @@ class PlaywrightMiddleware:
                 self.logger.info(self.instance_manager.get_status_report())
             self.last_stat_time = time.time()
 
-        # 跳过图片请求
-        if 'jpg' in request.url:
+        # 跳过图片/媒体请求（走 Scrapy 原生下载器：ImagesPipeline 与 NGA 图片 CDN 无需浏览器）
+        url_l = request.url.lower()
+        if any(url_l.endswith(ext) or (ext + '?') in url_l
+               for ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')):
+            # 图床域重写（2026-10-13 实测）：页面里的 img*.nga.178.com 在本网络解析不到（DNS 无记录），
+            # 同路径 img*.nga.cn 有效（附件 /attachments/ 与表情 /ngabbs/post/smile/ 两条路径均验证 200）
+            # ——不重写则图片下载全部失败。
+            if 'nga.178.com' in request.url:
+                request._set_url(request.url.replace('nga.178.com', 'nga.cn'))
             return None
 
         try:
