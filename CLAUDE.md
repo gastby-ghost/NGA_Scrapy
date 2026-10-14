@@ -42,6 +42,7 @@ cd scheduler && python run_scheduler.py
 - **nga_spider.py:1-405** - `NgaSpider` class with incremental crawling logic
 - Compares timestamps to skip duplicates
 - Parses topic lists, replies, and user info
+- Reply recommend values (赞) come from the inlined `commonui.postArg.proc` script triples — the `span.recommendvalue` component is JS-rendered and absent from raw bodies, which is why the column was all-zero before 2026-10-14
 
 ### Data Layer
 - **models.py:1-50** - SQLAlchemy models (User, Topic, Reply)
@@ -67,6 +68,9 @@ cd scheduler && python run_scheduler.py
 - **monitors/config.yaml** - thresholds, politeness, per-platform tracking caps, duration window
 - Manual run: `venv/bin/python monitors/run.py [--platform hn] [--sync-only]`
 - Table DDL for the new tables: `create_monitor_tables.py` (creates only missing tables — never run `init_db.py`, it drops everything)
+
+### Maintenance tools
+- **backfill_recommend.py** - one-off backfill of `reply.recommendvalue`: walks each topic from its last page backwards, stops once a page predates the topic's oldest stored reply, and only UPDATEs changed rows. Resumable via `backfill_recommend_progress.json`; syncs `post.recommend` on completion. Single-page threads carry no `var __PAGE` — total-page fallback (last-page link → max(`page=`) → 1) mirrors the spider. Run: `venv/bin/python backfill_recommend.py [--limit N | --tid TID]`
 
 ### Configuration
 - **settings.py** - Playwright pool size, timeouts, concurrency

@@ -854,6 +854,28 @@ class NgaSpider(scrapy.Spider):
         replies = response.xpath('//*[@class="forumbox postbox"]')
         self.logger.debug(f"📜 主题 {tid}: 当前页 {current_page}/{last_page} 共有 {len(replies)} 条回复")
 
+        # 推荐值（赞）映射（2026-10-14 修复）：
+        # span.recommendvalue 由前端 JS 渲染——HTTP 快路径（服务器原始体）与 domcontentloaded 即时
+        # 快照都拿不到该组件（此前整库全零的成因）。同一数据在原始体内联脚本
+        # commonui.postArg.proc(<楼号>, …, 'a,<推荐值>,c', …) 三元组中——经逐楼与渲染值对照验证。
+        # 楼号→pid 由 DOM 锚点建映射，两者按楼号连接。
+        recommend_map = {}
+        try:
+            floor_pid = {}
+            for el in response.xpath('//*[starts-with(@id, "postcontainer")]'):
+                n = (el.get('id') or '').replace('postcontainer', '')
+                a = el.xpath('./a[1]/@id')
+                if not a or not n:
+                    continue
+                pid = a[0].replace('pid', '').replace('Anchor', '')
+                floor_pid[n] = tid if pid == '0' else pid  # 主楼 pid0 → tid（与循环内口径一致）
+            for m in re.finditer(r"commonui\.postArg\.proc\(\s*(\d+),(.*?)if\(", response.text, re.S):
+                triples = re.findall(r"'(\d+),(\d+),(\d+)'", m.group(2))
+                if triples and m.group(1) in floor_pid:
+                    recommend_map[floor_pid[m.group(1)]] = triples[-1][1]
+        except Exception as e:
+            self.logger.warning(f"推荐值映射解析失败（{type(e).__name__}: {e}），回退 span 提取")
+
         for idx, reply in enumerate(replies, 1):
             self.logger.debug(f"📝 主题 {tid}: 开始处理第 {idx} 条回复 (当前页 {current_page}/{last_page})")
             post_id = reply.xpath('.//*[starts-with(@id, "postcontainer")]/a[1]/@id').get()
@@ -885,7 +907,10 @@ class NgaSpider(scrapy.Spider):
             
             content = self._extract_post_content(reply)
 
-            recommendvalue = reply.xpath('.//span[contains(@class,"recommendvalue")]/text()').get('0')
+            # 推荐值：优先取页面级映射（原始体脚本三元组——快路径可用）；缺失时回退渲染 DOM 的 span
+            recommendvalue = recommend_map.get(post_id)
+            if recommendvalue is None:
+                recommendvalue = reply.xpath('.//span[contains(@class,"recommendvalue")]/text()').get('0')
             post_time = reply.xpath('.//*[starts-with(@id, "postdate")]/text()').get()
 
             # 如果回复时间为None，使用当前时间
