@@ -86,6 +86,9 @@ def main():
                 path = os.path.join(work, f'{table}.csv')
                 sql = (f'COPY (SELECT * FROM {quote(table)} {where}) '
                        'TO STDOUT WITH CSV HEADER')
+                sql = cur.mogrify(sql, params)
+                if isinstance(sql, bytes):
+                    sql = sql.decode()
                 with open(path, 'w', encoding='utf-8', newline='') as f:
                     cur.copy_expert(sql, f)
                 with open(path, encoding='utf-8') as f:
