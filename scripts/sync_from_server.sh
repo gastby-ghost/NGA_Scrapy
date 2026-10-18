@@ -11,6 +11,7 @@
 
 set -euo pipefail
 
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$HOME/NGA_backups}"
 HOST="${NGA_HOST:-aliyun-hust}"
 REMOTE_DIR="/opt/nga_scrapy"
@@ -21,9 +22,9 @@ echo "[$(date '+%F %T')] 同步数据库备份 -> $DEST"
 rsync -az --info=stats1 "$HOST:$REMOTE_DIR/backups/" "$DEST/"
 
 if [ "${SYNC_IMAGES:-0}" = "1" ]; then
-    echo "[$(date '+%F %T')] 增量同步图片（可能较慢）..."
-    mkdir -p "$DEST/images"
-    rsync -az "$HOST:$REMOTE_DIR/download_images/" "$DEST/images/"
+    echo "[$(date '+%F %T')] 增量同步图片 -> $DIR/download_images（只传新增/变化的文件）"
+    mkdir -p "$DIR/download_images"
+    rsync -az --info=stats1 "$HOST:$REMOTE_DIR/download_images/" "$DIR/download_images/"
 fi
 
 echo "最近备份："
