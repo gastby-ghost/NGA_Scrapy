@@ -279,7 +279,8 @@ class PageFetcher:
                                             max_redirects=5, timeout=30000)
                     if r.ok:
                         content = decode_nga_html(r.body())
-                        if not any(kw in content for kw in ANTIBOT_KEYWORDS):
+                        hits = [kw for kw in ANTIBOT_KEYWORDS if kw in content]
+                        if not hits:
                             fast_time = time.time() - fast_start
                             self.logger.debug(f"⚡ HTTP 快路径：{fast_time:.2f}s，{len(content)} 字符")
                             return {
@@ -287,7 +288,7 @@ class PageFetcher:
                                 'success': True, 'nav_time': fast_time,
                                 'content_length': len(content),
                             }
-                        self.logger.warning("⚠️ HTTP 快路径命中异常页（登录墙/反爬词），回退浏览器导航")
+                        self.logger.warning(f"⚠️ HTTP 快路径命中异常页（{hits}），回退浏览器导航")
                     else:
                         self.logger.warning(f"⚠️ HTTP 快路径状态码 {r.status}，回退浏览器导航")
                 except Exception as e:
@@ -349,8 +350,10 @@ class PageFetcher:
                 self.save_html_debug_file(page_content, url, "no_nga_content")
 
             # 检查是否有反爬虫提示（含登录墙：cookie 失效/未生效时 NGA 返回 <title>未登录</title> 错误页）
-            if any(keyword in page_content for keyword in ANTIBOT_KEYWORDS):
-                self.logger.warning(f"⚠️ [DEBUG] 检测到反爬虫或验证页面")
+            # 2026-10-18：打印命中的具体关键字，调度器据此区分登录墙与限流/验证码并发送告警。
+            antibot_hits = [kw for kw in ANTIBOT_KEYWORDS if kw in page_content]
+            if antibot_hits:
+                self.logger.warning(f"⚠️ [DEBUG] 检测到反爬虫或验证页面: {antibot_hits}")
                 self.save_html_debug_file(page_content, url, "anti_bot")
 
             return {

@@ -21,6 +21,21 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
 
+def _sparkline(values: list) -> str:
+    """Unicode 块字符迷你趋势图（2026-10-18）。
+
+    纯文本与 HTML 邮件都能显示，不依赖外部图片。0 值会显示为最低块，
+    缺失日期已在采集端补 0，因此能直观看出"哪几天断了"。
+    """
+    if not values:
+        return ''
+    lo, hi = min(values), max(values)
+    if hi == lo:
+        return '█' * len(values)
+    chars = '▁▂▃▄▅▆▇█'
+    return ''.join(chars[int((v - lo) / (hi - lo) * (len(chars) - 1))] for v in values)
+
+
 class AsciiChartGenerator:
     """ASCII图表生成器，用于在纯文本邮件中显示简单的趋势图表"""
 
@@ -186,13 +201,58 @@ class EmailNotifier:
         # 计算下载数据大小（MB）
         downloaded_mb = stats.get('response_bytes', 0) / (1024 * 1024)
 
-        # 计算数据效率
+        # 计算数据效率（2026-10-18 修复：原键名 pages_craped 拼写错误，效率恒等于 items/1）
         efficiency = 0
         if stats.get('pages_crawled', 0) > 0:
-            efficiency = stats.get('items_scraped', 0) / stats.get('pages_craped', 1)
+            efficiency = stats.get('items_scraped', 0) / stats.get('pages_crawled', 1)
+
+        # 数据入库与磁盘（2026-10-18 新增；由 run_scheduler.collect_db_metrics 提供）
+        db_lines = []
+        if 'db_reply_total' in stats:
+            daily = stats.get('db_daily_replies') or {}
+            age = stats.get('db_latest_age_hours')
+            if age is None:
+                state_line = "状态: ❔ 未知"
+            elif age >= 3:
+                state_line = f"状态: ❌ 数据停滞（最新数据 {age:.1f} 小时前）"
+            elif age >= 1.5:
+                state_line = f"状态: ⚠️ 数据延迟（最新数据 {age:.1f} 小时前）"
+            else:
+                state_line = f"状态: ✅ 采集正常（最新数据 {age:.1f} 小时前）"
+
+            db_lines = [
+                state_line,
+                "",
+                "📦 数据入库（实际写入数据库）:",
+                f"  - 累计主题: {stats.get('db_topic_total', 0):,}",
+                f"  - 累计回复: {stats.get('db_reply_total', 0):,}",
+                f"  - 累计用户: {stats.get('db_user_total', 0):,}",
+                f"  - 统一记录 post: {stats.get('db_post_total', 0):,}",
+            ]
+            if daily:
+                days = sorted(daily)
+                vals = [daily[d] for d in days]
+                db_lines.append(f"  - 近 7 天入库: {_sparkline(vals)}")
+                for d, n in zip(days, vals):
+                    db_lines.append(f"      {d}: {n:,} 条回复")
+            latest = stats.get('db_latest_sampling')
+            if latest:
+                db_lines.append(f"  - 最新采样时间: {latest}")
+            db_lines.append(f"  - 数据库大小: {stats.get('db_size_pretty', 'N/A')}")
+            db_lines.append("")
+            db_lines.append("💿 图片与磁盘:")
+            db_lines.append(f"  - 图片文件: {stats.get('images_files', 0):,} 个 / {stats.get('images_size_mb', 0):.1f} MB")
+            db_lines.append("")
 
         # 格式化邮件内容
         subject = f"NGA爬虫数据统计报告 - {datetime.now().strftime('%Y-%m-%d')}"
+        # 状态直接进主题，收件箱里一眼可见（2026-10-18）
+        if 'db_latest_age_hours' in stats:
+            age = stats['db_latest_age_hours']
+            if age >= 3:
+                subject = "❌ 数据停滞 - " + subject
+            elif age >= 1.5:
+                subject = "⚠️ 数据延迟 - " + subject
 
         # 纯文本版本
         body_lines = [
@@ -201,8 +261,9 @@ class EmailNotifier:
             "=" * 70,
             f"报告时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
-            "📊 爬取统计:",
-            f"  - 抓取项目总数: {stats.get('items_scraped', 0):,}",
+        ] + db_lines + [
+            "📊 爬取统计（技术指标）:",
+            f"  - 抓取条目: {stats.get('items_scraped', 0):,}（含每轮重复抓取的活跃帖回复）",
             f"  - 爬取页面总数: {stats.get('pages_crawled', 0):,}",
             f"  - 去重过滤数: {stats.get('dupefilter_filtered', 0):,}",
             f"  - 数据提取效率: {efficiency:.2f} 项目/页",
@@ -223,6 +284,7 @@ class EmailNotifier:
             "✅ 执行状态:",
             f"  - 执行成功率: {stats.get('success_rate', 0):.1f}%",
             f"  - 最近执行状态: {stats.get('latest_status', 'unknown')}",
+            f"  - 反爬/登录墙命中: {stats.get('antibot_hits', 0):,} 次",
             "",
         ]
 
@@ -252,6 +314,74 @@ class EmailNotifier:
         avg_page_size = 0
         if stats.get('pages_crawled', 0) > 0:
             avg_page_size = (stats.get('response_bytes', 0) / stats.get('pages_crawled', 1)) / 1024
+
+        # 数据入库 HTML（2026-10-18 新增；旧版报告无这些字段时整段跳过）
+        db_html = ""
+        if 'db_reply_total' in stats:
+            daily = stats.get('db_daily_replies') or {}
+            age = stats.get('db_latest_age_hours')
+
+            # 状态徽章：绿 / 黄 / 红对应采集正常 / 延迟 / 停滞
+            if age is None:
+                status_html = ""
+            elif age >= 3:
+                status_html = (
+                    '<div style="background:#ffebee;border-left:4px solid #c62828;'
+                    'padding:12px 16px;margin-bottom:20px;border-radius:4px;color:#b71c1c;">'
+                    f'<strong>❌ 数据停滞</strong> · 最新数据 {age:.1f} 小时前</div>'
+                )
+            elif age >= 1.5:
+                status_html = (
+                    '<div style="background:#fff8e1;border-left:4px solid #f9a825;'
+                    'padding:12px 16px;margin-bottom:20px;border-radius:4px;color:#8d6e00;">'
+                    f'<strong>⚠️ 数据延迟</strong> · 最新数据 {age:.1f} 小时前</div>'
+                )
+            else:
+                status_html = (
+                    '<div style="background:#e8f5e9;border-left:4px solid #2e7d32;'
+                    'padding:12px 16px;margin-bottom:20px;border-radius:4px;color:#1b5e20;">'
+                    f'<strong>✅ 采集正常</strong> · 最新数据 {age:.1f} 小时前</div>'
+                )
+
+            # 近 7 天每日入库条形图（table 布局，兼容邮件客户端）
+            days = sorted(daily)
+            vals = [daily[d] for d in days]
+            max_daily = max(vals) if vals else 0
+            bars = ""
+            for d, n in zip(days, vals):
+                pct = (n / max_daily * 100) if max_daily else 0
+                bars += (
+                    '<tr>'
+                    f'<td style="width:92px;font-size:13px;color:#555;padding:3px 0;">{d}</td>'
+                    '<td style="padding:3px 10px;">'
+                    '<div style="background:#eef1f5;height:16px;border-radius:3px;">'
+                    f'<div style="width:{pct:.1f}%;height:16px;background:#667eea;border-radius:3px;"></div>'
+                    '</div></td>'
+                    f'<td style="width:70px;text-align:right;font-size:13px;color:#333;">{n:,}</td>'
+                    '</tr>'
+                )
+            spark = _sparkline(vals)
+
+            db_html = f"""
+                    {status_html}
+                    <h2>📦 数据入库</h2>
+                    <div class="stats-grid">
+                        <div class="stat-card"><div class="label">累计主题</div><div class="number">{stats.get('db_topic_total', 0):,}</div></div>
+                        <div class="stat-card"><div class="label">累计回复</div><div class="number">{stats.get('db_reply_total', 0):,}</div></div>
+                        <div class="stat-card"><div class="label">累计用户</div><div class="number">{stats.get('db_user_total', 0):,}</div></div>
+                        <div class="stat-card"><div class="label">数据库大小</div><div class="number">{stats.get('db_size_pretty', 'N/A')}</div></div>
+                    </div>
+                    <div class="stat-box">
+                        <div style="font-size:13px;color:#555;margin-bottom:6px;">近 7 天每日入库（条）</div>
+                        <div style="font-family:monospace;font-size:20px;letter-spacing:3px;color:#667eea;margin-bottom:10px;">{spark}</div>
+                        <table style="width:100%;border-collapse:collapse;">{bars}</table>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-item"><span class="label">最新采样时间</span><span class="value">{stats.get('db_latest_sampling', 'N/A')}</span></div>
+                        <div class="stat-item"><span class="label">图片文件</span><span class="value">{stats.get('images_files', 0):,} 个 / {stats.get('images_size_mb', 0):.1f} MB</span></div>
+                    </div>
+                    <div class="divider"></div>
+            """
 
         # 趋势分析HTML
         trend_html = ""
@@ -413,10 +543,11 @@ class EmailNotifier:
                 </div>
 
                 <div class="content">
+                    {db_html}
                     <h2>📈 核心指标概览</h2>
                     <div class="stats-grid">
                         <div class="stat-card">
-                            <div class="label">抓取项目</div>
+                            <div class="label">抓取条目（含重复）</div>
                             <div class="number">{stats.get('items_scraped', 0):,}</div>
                         </div>
                         <div class="stat-card">
@@ -508,6 +639,10 @@ class EmailNotifier:
                         <div class="stat-item">
                             <span class="label">最近执行状态</span>
                             <span class="value info">{stats.get('latest_status', 'unknown')}</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="label">反爬/登录墙命中</span>
+                            <span class="value warning">{stats.get('antibot_hits', 0):,} 次</span>
                         </div>
                     </div>
 
@@ -652,6 +787,7 @@ class StatisticsCollector:
             'failed_runs': 0,
             'avg_crawl_speed': 0.0,
             'avg_page_size': 0.0,
+            'antibot_hits': 0,
         }
 
         # 用于趋势分析的历史数据
@@ -666,8 +802,9 @@ class StatisticsCollector:
             import glob
             from datetime import datetime as dt
 
-            # 获取所有统计文件
-            stats_files = glob.glob(os.path.join(self.stats_dir, "spider_stats_*.json"))
+            # 获取所有统计文件（文件名含时间戳，排序即时间序；2026-10-18 修复：
+            # 原实现依赖 glob 返回顺序，latest_status 可能取到任意一次的状态）
+            stats_files = sorted(glob.glob(os.path.join(self.stats_dir, "spider_stats_*.json")))
 
             if not stats_files:
                 logger.warning(f"未找到统计文件: {self.stats_dir}")
@@ -708,6 +845,7 @@ class StatisticsCollector:
                         aggregated_stats['pages_crawled'] += pages_crawled
                         aggregated_stats['dupefilter_filtered'] += dupefilter_filtered
                         aggregated_stats['response_bytes'] += response_bytes
+                        aggregated_stats['antibot_hits'] += spider_stats.get('custom/antibot_hits', 0)
 
                         # 统计成功/失败
                         if data.get('success', False):

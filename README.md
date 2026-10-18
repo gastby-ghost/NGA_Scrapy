@@ -124,13 +124,19 @@ python run_scheduler.py
 
 ### 8. 配置邮件通知（可选）
 
-编辑 `scheduler/email_config.yaml`:
+复制模板后填写（`email_config.yaml` 已被 `.gitignore` 排除）：
+
+```bash
+cp scheduler/email_config.yaml.example scheduler/email_config.yaml
+```
+
+配置示例：
 
 ```yaml
 smtp_server: "smtp.qq.com"
 smtp_port: 587
 username: "your_email@qq.com"
-password: "your_app_password"  # 使用应用密码，不是QQ密码
+password: "your_app_password"  # 使用 SMTP 授权码，不是QQ密码
 from_email: "your_email@qq.com"
 to_emails:
   - "recipient@example.com"
@@ -141,7 +147,22 @@ notifications:
   statistics_report_interval_days: 3
   enable_error_alerts: true
   consecutive_failures_threshold: 3
+
+  # 反爬/登录墙告警：单轮命中达到阈值即发信
+  antibot_alert:
+    enabled: true
+    threshold_per_round: 5
+    cooldown_minutes: 360
+
+  # 抓取量骤降告警：本轮 item 数低于上一轮的比例时发信
+  item_drop_alert:
+    enabled: true
+    threshold_ratio: 0.1
+    min_prev_items: 2000
+    cooldown_minutes: 360
 ```
+
+**三类结果信号告警（2026-10-18）**：进程正常退出不代表抓取成功。登录态失效时 NGA 返回「未登录」页面，进程仍会以返回码 0 结束。因此调度器额外检查三件事：本轮是否命中反爬/登录墙页面、本轮 item 数是否比上一轮骤降、数据库最新采样时间是否超过 3 小时。最后一项直接查库，是「采集是否真的在继续」的最终判据。同类告警有冷却时间，避免每 30 分钟重复发信。
 
 ## 📊 云服务器优化配置 (2核4G)
 

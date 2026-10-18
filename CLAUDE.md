@@ -95,6 +95,9 @@ cd scheduler && python run_scheduler.py
 ### Email Notifications (email_notifier.py:24-307)
 - **Statistics Reports**: Periodic reports (default: every 3 days at 09:00)
 - **Error Alerts**: Real-time notifications for failures, timeouts, high error rates
+- **Result-signal Alerts** (2026-10-18): anti-bot/login-wall hits per round (`antibot_alert`), item-count collapse vs the previous round (`item_drop_alert`), and DB staleness (`data_freshness_alert`) — catches silent failures where the spider exits 0 but scrapes nothing. Same-type alerts are throttled by `cooldown_minutes`.
+- **Report content** (2026-10-18): `collect_db_metrics()` queries the DB directly for cumulative counts, daily intake and latest sampling time; `item_scraped_count` is labeled as "抓取条目（含重复）" and is not treated as intake.
+- **Config**: `scheduler/email_config.yaml` (gitignored); template at `scheduler/email_config.yaml.example`
 - **First Report**: Sent immediately after first successful crawl
 
 ## Common Development Tasks

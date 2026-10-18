@@ -6,6 +6,8 @@ import logging
 import logging.handlers
 import yaml
 import os
+import json
+import glob
 from datetime import datetime, timedelta
 from collections import deque
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -68,6 +70,7 @@ consecutive_failures = 0
 error_rates = deque(maxlen=100)  # 保存最近100次执行的错误率
 spider_start_time = None
 first_run_completed = False  # 标记是否已完成第一次爬虫
+_last_alert_time = {}  # 告警类型 → 上次发送时间（同类告警冷却去重，2026-10-18）
 
 # 加载配置文件
 def load_config():
@@ -85,9 +88,12 @@ def load_config():
         with open(config_file, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
 
-        # 创建邮件发送器
-        if config.get('notifications', {}).get('enable_statistics_report') or \
-           config.get('notifications', {}).get('enable_error_alerts'):
+        # 创建邮件发送器（任一通知开关打开即初始化）
+        notifications = config.get('notifications', {})
+        if (notifications.get('enable_statistics_report') or
+                notifications.get('enable_error_alerts') or
+                notifications.get('antibot_alert', {}).get('enabled') or
+                notifications.get('item_drop_alert', {}).get('enabled')):
 
             email_notifier = EmailNotifier(
                 smtp_server=config['smtp_server'],
@@ -250,12 +256,6 @@ def run_spider():
             logger.info("=" * 60)
             execution_success = True
             consecutive_failures = 0  # 重置连续失败计数
-
-            # 如果是第一次成功执行，发送统计报告
-            if not first_run_completed:
-                logger.info("第一次爬虫执行成功，开始发送统计报告...")
-                send_statistics_report()
-                first_run_completed = True
         else:
             logger.error(f"爬虫任务执行失败，返回码: {return_code}")
             consecutive_failures += 1
@@ -284,11 +284,28 @@ def run_spider():
                 logger.info(f"   - 运行时间: {spider_stats.get('elapsed_time_seconds', 0):.2f}秒")
                 logger.info(f"   - 完成状态: {spider_stats.get('finish_reason', 'unknown')}")
 
+        # 结果信号告警（反爬/登录墙、抓取量骤降）
+        # 必须在保存本轮统计前读取上一轮基线，否则会拿本轮和自己比
+        if spider_stats:
+            # 反爬命中数写入本轮统计，供统计报告汇总
+            spider_stats['custom/antibot_hits'] = sum(
+                1 for line in output_lines if '检测到反爬虫或验证页面' in line)
+            check_result_alerts(spider_stats, output_lines, _load_prev_item_count())
+
+        # 数据停滞检查（2026-10-18）：不管本轮是否"成功"，库里没新数据就告警
+        check_data_freshness()
+
         # 保存统计信息到文件
         if spider_stats:
             _save_spider_statistics(spider_stats, return_code, execution_success)
         else:
             logger.warning("⚠️ 未获取到爬虫统计信息")
+
+        # 首次成功：等本轮统计落盘后再发报告，避免报告窗口里少了本轮（2026-10-18）
+        if return_code == 0 and not first_run_completed:
+            logger.info("第一次爬虫执行成功，开始发送统计报告...")
+            send_statistics_report()
+            first_run_completed = True
 
         # 计算错误率（简化计算：基于返回码）
         error_rate = 0 if return_code == 0 else 100
@@ -468,6 +485,189 @@ def _save_spider_statistics(stats: dict, return_code: int, success: bool):
     except Exception as e:
         logger.exception(f"❌ 保存统计信息失败: {e}")
 
+# ========== 结果信号告警（2026-10-18） ==========
+# 进程返回码只能说明「爬虫有没有跑完」，不能说明「有没有真的抓到东西」。
+# 登录失效时进程正常退出、日志只有一行 warning——这里把结果信号也接进邮件告警。
+
+def _send_alert_throttled(alert_type: str, message: str, details: str = None,
+                          cooldown_minutes: int = 360) -> bool:
+    """发送告警邮件；同类告警在冷却期内只发一次，避免 30 分钟一轮刷屏。"""
+    now = datetime.now()
+    last = _last_alert_time.get(alert_type)
+    if last and (now - last).total_seconds() < cooldown_minutes * 60:
+        logger.info(f"告警「{alert_type}」处于冷却期（{cooldown_minutes} 分钟），跳过发送")
+        return False
+    if not email_notifier:
+        logger.warning(f"邮件通知器未初始化，无法发送告警: {message}")
+        return False
+    logger.warning(f"发送告警邮件: {message}")
+    if email_notifier.send_alert(alert_type, message, details):
+        _last_alert_time[alert_type] = now
+        return True
+    return False
+
+
+def _load_prev_item_count():
+    """读取上一轮爬虫的 item 数（stats 目录里最新的文件）。"""
+    try:
+        stats_dir = os.path.join(SCRIPT_DIR, 'stats')
+        files = sorted(glob.glob(os.path.join(stats_dir, 'spider_stats_*.json')))
+        if not files:
+            return None
+        with open(files[-1], 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return (data.get('summary', {}).get('items_scraped') or
+                data.get('spider_stats', {}).get('item_scraped_count'))
+    except Exception as e:
+        logger.debug(f"读取上一轮统计失败: {e}")
+        return None
+
+
+def collect_db_metrics():
+    """直接从数据库与磁盘采集研究数据状态（2026-10-18）。
+
+    统计报告的核心问题：Scrapy 的 item_scraped_count 含大量重复抓取，
+    不能代表入库增长。这里直接查库，给出真实的累计量与每日新增。
+    """
+    metrics = {}
+    try:
+        from database_config import get_database_url
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(get_database_url(), pool_pre_ping=True)
+        with engine.connect() as conn:
+            for label, table in (('topic', 'topic'), ('reply', 'reply'),
+                                 ('user', '"user"'), ('post', 'post')):
+                metrics[f'db_{label}_total'] = conn.execute(
+                    text(f'SELECT count(*) FROM {table}')).scalar()
+
+            # 近 7 天每日入库（补齐缺失日期为 0，图表才能显示"哪天断了"）
+            start_dt = datetime.now() - timedelta(days=6)
+            start = start_dt.strftime('%Y-%m-%d')
+            rows = conn.execute(
+                text("""
+                    SELECT left(sampling_time, 10) AS d, count(*)
+                    FROM reply
+                    WHERE left(sampling_time, 10) >= :start
+                    GROUP BY 1 ORDER BY 1
+                """), {'start': start}).fetchall()
+            daily_map = {r[0]: r[1] for r in rows}
+            days = [(start_dt + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
+            metrics['db_daily_replies'] = {d: daily_map.get(d, 0) for d in days}
+
+            latest = conn.execute(
+                text('SELECT max(sampling_time) FROM reply')).scalar()
+            metrics['db_latest_sampling'] = latest
+            if latest:
+                try:
+                    latest_dt = datetime.strptime(latest, '%Y-%m-%d-%H-%M-%S')
+                    metrics['db_latest_age_hours'] = round(
+                        (datetime.now() - latest_dt).total_seconds() / 3600, 1)
+                except ValueError:
+                    pass
+            metrics['db_size_pretty'] = conn.execute(
+                text('SELECT pg_size_pretty(pg_database_size(current_database()))')).scalar()
+    except Exception as e:
+        logger.warning(f"采集数据库指标失败（报告将缺少入库数据）: {e}")
+
+    try:
+        store = os.path.join(PROJECT_ROOT, 'download_images')
+        total = files = 0
+        for root, _, names in os.walk(store):
+            for name in names:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                    files += 1
+                except OSError:
+                    pass
+        metrics['images_files'] = files
+        metrics['images_size_mb'] = round(total / 1048576, 1)
+    except Exception as e:
+        logger.debug(f"采集图片目录失败: {e}")
+
+    return metrics
+
+
+def check_data_freshness():
+    """数据停滞检测：最新采样时间距今超过阈值即告警（2026-10-18）。
+
+    这是最直接的失败信号：不管进程为什么正常退出，只要库里没有新数据，
+    说明采集实际上已经停了。
+    """
+    config = scheduler.config if hasattr(scheduler, 'config') else None
+    if not config or not email_notifier:
+        return
+    cfg = config.get('notifications', {}).get('data_freshness_alert', {})
+    if not cfg.get('enabled', True):
+        return
+    try:
+        from database_config import get_database_url
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(get_database_url(), pool_pre_ping=True)
+        with engine.connect() as conn:
+            latest = conn.execute(text('SELECT max(sampling_time) FROM reply')).scalar()
+        if not latest:
+            return
+        latest_dt = datetime.strptime(latest, '%Y-%m-%d-%H-%M-%S')
+        age_hours = (datetime.now() - latest_dt).total_seconds() / 3600
+        threshold = cfg.get('max_age_hours', 3)
+        if age_hours >= threshold:
+            _send_alert_throttled(
+                "数据停滞",
+                f"最新采样时间 {latest}，距今 {age_hours:.1f} 小时（阈值 {threshold} 小时）",
+                "爬虫可能在空转：登录态失效、反爬拦截或调度器未运行。\n"
+                "请检查 scheduler.log 与 nga_spider.log。",
+                cfg.get('cooldown_minutes', 360)
+            )
+    except Exception as e:
+        logger.debug(f"数据新鲜度检查失败: {e}")
+
+
+def check_result_alerts(spider_stats: dict, output_lines: list, prev_items=None):
+    """基于「本轮实际抓到了什么」发告警，覆盖进程正常但结果异常的情况。"""
+    config = scheduler.config if hasattr(scheduler, 'config') else None
+    if not config or not email_notifier:
+        return
+    notifications = config.get('notifications', {})
+
+    # 1) 反爬 / 登录墙
+    antibot_alerted = False
+    antibot_cfg = notifications.get('antibot_alert', {})
+    if antibot_cfg.get('enabled', True):
+        hits = sum(1 for line in output_lines if '检测到反爬虫或验证页面' in line)
+        threshold = antibot_cfg.get('threshold_per_round', 5)
+        if hits >= threshold:
+            details = (
+                f"命中反爬/登录墙页面的次数: {hits}（阈值 {threshold}）\n"
+                f"本轮 item 数: {spider_stats.get('item_scraped_count', 0)}\n\n"
+                "常见原因：NGA 登录态失效（页面标题变为「未登录」）或触发访问频率限制。\n"
+                "处理：本地运行 get_cookies.py 重新登录，再把 cookies.txt 上传到服务器覆盖。"
+            )
+            antibot_alerted = _send_alert_throttled(
+                "反爬/登录墙", f"本轮检测到 {hits} 次反爬或登录墙页面",
+                details, antibot_cfg.get('cooldown_minutes', 360)
+            )
+
+    # 2) 抓取量骤降（登录失效不一定每次命中反爬词，但 item 数会塌）
+    # 反爬告警已发出时不再重复——两者多半是同一个原因。
+    drop_cfg = notifications.get('item_drop_alert', {})
+    if drop_cfg.get('enabled', True) and prev_items and not antibot_alerted:
+        current = spider_stats.get('item_scraped_count', 0)
+        min_prev = drop_cfg.get('min_prev_items', 2000)
+        ratio = drop_cfg.get('threshold_ratio', 0.1)
+        if prev_items >= min_prev and current < prev_items * ratio:
+            details = (
+                f"上一轮 item 数: {prev_items}\n"
+                f"本轮 item 数: {current}（{current / prev_items * 100:.1f}%）\n\n"
+                "常见原因：登录失效、反爬拦截、页面结构变化。请检查 scheduler.log 与 nga_spider.log。"
+            )
+            _send_alert_throttled(
+                "抓取量骤降", f"本轮 item 数仅为上一轮的 {current / prev_items * 100:.0f}%",
+                details, drop_cfg.get('cooldown_minutes', 360)
+            )
+
+
 def check_error_alerts(return_code: int, error_output: list):
     """检查是否需要发送错误告警"""
     config = scheduler.config if hasattr(scheduler, 'config') else None
@@ -483,9 +683,7 @@ def check_error_alerts(return_code: int, error_output: list):
         message = f"爬虫连续失败 {consecutive_failures} 次"
         details = "\n".join(error_output) if error_output else "无详细错误信息"
 
-        logger.error(f"发送告警邮件: {message}")
-        if email_notifier:
-            email_notifier.send_alert("爬虫连续失败", message, details)
+        _send_alert_throttled("爬虫连续失败", message, details, 60)
 
     # 检查超时
     if spider_start_time:
@@ -494,9 +692,7 @@ def check_error_alerts(return_code: int, error_output: list):
             message = f"爬虫运行时间超过 {timeout_minutes} 分钟"
             details = f"开始时间: {spider_start_time}"
 
-            logger.error(f"发送告警邮件: {message}")
-            if email_notifier:
-                email_notifier.send_alert("爬虫运行超时", message, details)
+            _send_alert_throttled("爬虫运行超时", message, details, 60)
 
     # 检查错误率
     error_rate_config = notifications_config.get('error_rate_alert', {})
@@ -510,9 +706,7 @@ def check_error_alerts(return_code: int, error_output: list):
             message = f"爬虫错误率达到 {avg_error_rate:.1f}%，超过阈值 {threshold_percent}%"
             details = f"最近 {len(recent_rates)} 次执行的平均错误率: {avg_error_rate:.2f}%"
 
-            logger.error(f"发送告警邮件: {message}")
-            if email_notifier:
-                email_notifier.send_alert("爬虫错误率过高", message, details)
+            _send_alert_throttled("爬虫错误率过高", message, details, 360)
 
 def send_statistics_report():
     """发送统计报告"""
@@ -538,6 +732,9 @@ def send_statistics_report():
         if not stats:
             logger.warning("未能收集到统计数据")
             return
+
+        # 合并数据库与磁盘的真实状态（2026-10-18）：Scrapy 的 item 数不等于入库增长
+        stats.update(collect_db_metrics())
 
         # 提取趋势数据
         trend_data = stats.get('trend_data', {})

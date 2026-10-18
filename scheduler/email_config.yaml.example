@@ -1,0 +1,50 @@
+# 邮件通知配置模板（2026-10-18）
+# 使用方法：
+#   cp scheduler/email_config.yaml.example scheduler/email_config.yaml
+#   然后在 email_config.yaml 中填入真实邮箱与 SMTP 授权码。
+# email_config.yaml 已被 .gitignore 排除，不会进入版本库。
+
+smtp_server: "smtp.qq.com"
+smtp_port: 587
+username: "your_email@qq.com"
+password: "your_smtp_app_password"  # QQ 邮箱的 SMTP 授权码，不是登录密码
+from_email: "your_email@qq.com"
+to_emails:
+  - "recipient@example.com"
+use_tls: true
+
+notifications:
+  # 统计报告：每 3 天 09:00 一封
+  enable_statistics_report: true
+  statistics_report_interval_days: 3
+  statistics_report_time: "09:00"
+
+  # 错误告警：进程失败、超时、错误率
+  enable_error_alerts: true
+  consecutive_failures_threshold: 3
+  spider_timeout_minutes: 60
+  error_rate_alert:
+    enabled: false
+    threshold_percent: 20
+
+  # 反爬/登录墙告警：单轮命中「检测到反爬虫或验证页面」达到阈值即发信。
+  # 登录态失效时 NGA 返回 <title>未登录</title>，会命中这里。
+  antibot_alert:
+    enabled: true
+    threshold_per_round: 5
+    cooldown_minutes: 360
+
+  # 抓取量骤降告警：本轮 item 数低于上一轮的比例时发信。
+  # min_prev_items 避免首次全量爬取后正常回落造成误报。
+  item_drop_alert:
+    enabled: true
+    threshold_ratio: 0.1
+    min_prev_items: 2000
+    cooldown_minutes: 360
+
+  # 数据停滞告警：查库最新采样时间；超过 max_age_hours 即发信，
+  # 不管进程返回码是什么——这是最直接的失败信号。
+  data_freshness_alert:
+    enabled: true
+    max_age_hours: 3
+    cooldown_minutes: 360
