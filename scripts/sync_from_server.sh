@@ -21,6 +21,10 @@ mkdir -p "$DEST"
 echo "[$(date '+%F %T')] 同步数据库备份 -> $DEST"
 rsync -az --info=stats1 "$HOST:$REMOTE_DIR/backups/" "$DEST/"
 
+echo "[$(date '+%F %T')] 同步增量包 -> $DEST/incremental"
+mkdir -p "$DEST/incremental"
+rsync -az --info=stats1 "$HOST:$REMOTE_DIR/incremental/" "$DEST/incremental/"
+
 if [ "${SYNC_IMAGES:-0}" = "1" ]; then
     echo "[$(date '+%F %T')] 增量同步图片 -> $DIR/download_images（只传新增/变化的文件）"
     mkdir -p "$DIR/download_images"

@@ -9,6 +9,7 @@
     ./venv/bin/python scripts/merge_incremental.py <增量包.tar.gz> [更多包...]
 """
 
+import glob
 import json
 import os
 import sys
@@ -87,23 +88,53 @@ def merge_csv(conn, table, csv_path):
     return after
 
 
+def apply_package(conn, package):
+    print(f'应用 {os.path.basename(package)}')
+    with tempfile.TemporaryDirectory() as tmp:
+        with tarfile.open(package, 'r:gz') as tar:
+            tar.extractall(tmp)
+        for table in TABLES:
+            csv_path = os.path.join(tmp, f'{table}.csv')
+            if os.path.exists(csv_path):
+                merge_csv(conn, table, csv_path)
+
+
 def main():
-    if len(sys.argv) < 2:
-        sys.exit('用法: merge_incremental.py <增量包.tar.gz> [更多包...]')
+    args = sys.argv[1:]
+    auto_dir = None
+    applied_file = None
+    applied = []
+
+    if args and args[0] == '--auto':
+        if len(args) < 2:
+            sys.exit('用法: merge_incremental.py --auto <增量目录>')
+        auto_dir = args[1]
+        applied_file = os.path.join(auto_dir, '.applied.json')
+        if os.path.exists(applied_file):
+            with open(applied_file, encoding='utf-8') as f:
+                applied = json.load(f)
+        all_pkgs = sorted(glob.glob(os.path.join(auto_dir, 'nga_inc_*.tar.gz')))
+        packages = [p for p in all_pkgs if os.path.basename(p) not in applied]
+        if not packages:
+            print('没有新的增量包')
+            return
+    else:
+        packages = args
+
+    if not packages:
+        sys.exit('用法: merge_incremental.py <增量包.tar.gz> [更多包...] 或 --auto <目录>')
 
     conn = connect()
     try:
-        for package in sys.argv[1:]:
-            print(f'应用 {os.path.basename(package)}')
-            with tempfile.TemporaryDirectory() as tmp:
-                with tarfile.open(package, 'r:gz') as tar:
-                    tar.extractall(tmp)
-                for table in TABLES:
-                    csv_path = os.path.join(tmp, f'{table}.csv')
-                    if os.path.exists(csv_path):
-                        merge_csv(conn, table, csv_path)
+        for package in packages:
+            apply_package(conn, package)
     finally:
         conn.close()
+
+    if applied_file:
+        applied.extend(os.path.basename(p) for p in packages)
+        with open(applied_file, 'w', encoding='utf-8') as f:
+            json.dump(applied, f, ensure_ascii=False, indent=2)
 
     with connect() as c, c.cursor() as cur:
         cur.execute("SELECT count(*), max(sampling_time) FROM reply")
