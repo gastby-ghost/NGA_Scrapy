@@ -8,6 +8,7 @@ import yaml
 import os
 import json
 import glob
+import threading
 from datetime import datetime, timedelta
 from collections import deque
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -208,6 +209,34 @@ def run_spider():
         # 实时输出爬虫日志
         logger.info(f"爬虫进程已启动，PID: {spider_process.pid}")
 
+        # 关闭看门狗（2026-10-18）：Scrapy 2.19 下 spider 已完成关闭后进程仍可能不退出
+        # （Playwright/Twisted 收尾残留），wait() 无超时会让调度器永远阻塞。
+        # 出现 "Spider closed" 后给 90 秒退出宽限；整轮上限 2 小时。
+        _proc_state = {'closed_at': None}
+
+        def _spider_watchdog():
+            deadline = time.monotonic() + 7200
+            while time.monotonic() < deadline:
+                if spider_process.poll() is not None:
+                    return
+                closed_at = _proc_state['closed_at']
+                if closed_at is not None and time.monotonic() - closed_at > 90:
+                    logger.warning("spider 已关闭但进程 90 秒未退出，强制终止（关闭阶段残留）")
+                    try:
+                        spider_process.kill()
+                    except Exception:
+                        pass
+                    return
+                time.sleep(5)
+            if spider_process.poll() is None:
+                logger.warning("spider 运行超过 2 小时，强制终止")
+                try:
+                    spider_process.kill()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_spider_watchdog, daemon=True).start()
+
         # 等待进程完成并记录输出，同时解析统计信息
         output_lines = []
         stats_dict_str = ""  # 用于累积统计字典的字符串
@@ -216,6 +245,10 @@ def run_spider():
         for line in spider_process.stdout:
             line_stripped = line.strip()
             output_lines.append(line_stripped)
+
+            # 看门狗计时起点：一旦看到 Spider closed，只给固定宽限退出
+            if 'Spider closed' in line_stripped:
+                _proc_state['closed_at'] = time.monotonic()
 
             if line_stripped:
                 logger.info(f"[Spider] {line_stripped}")
