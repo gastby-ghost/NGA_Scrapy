@@ -198,123 +198,68 @@ class EmailNotifier:
         Returns:
             bool: 发送是否成功
         """
-        # 计算下载数据大小（MB）
-        downloaded_mb = stats.get('response_bytes', 0) / (1024 * 1024)
+        # ---- 数据准备（2026-10-18 精简版：一屏看完，含时长分布） ----
+        daily = stats.get('db_daily_replies') or {}
+        age = stats.get('db_latest_age_hours')
 
-        # 计算数据效率（2026-10-18 修复：原键名 pages_craped 拼写错误，效率恒等于 items/1）
-        efficiency = 0
-        if stats.get('pages_crawled', 0) > 0:
-            efficiency = stats.get('items_scraped', 0) / stats.get('pages_crawled', 1)
+        # 最近轮次时长分布
+        runtimes = stats.get('recent_runtimes') or []
+        rt_values = [r[1] for r in runtimes if r[1]]
+        rt_last = rt_values[-1] if rt_values else 0
+        rt_median = sorted(rt_values)[len(rt_values) // 2] if rt_values else 0
+        rt_max = max(rt_values) if rt_values else 0
 
-        # 数据入库与磁盘（2026-10-18 新增；由 run_scheduler.collect_db_metrics 提供）
-        db_lines = []
+        if age is None:
+            state_line = "状态未知"
+        elif age >= 3:
+            state_line = f"❌ 数据停滞（最新数据 {age:.1f} 小时前）"
+        elif age >= 1.5:
+            state_line = f"⚠️ 数据延迟（最新数据 {age:.1f} 小时前）"
+        else:
+            state_line = f"✅ 采集正常（最新数据 {age:.1f} 小时前）"
+
+        # 主题：状态直接可见
+        subject = f"NGA爬虫数据统计报告 - {datetime.now().strftime('%Y-%m-%d')}"
+        if age is not None and age >= 3:
+            subject = "❌ 数据停滞 - " + subject
+        elif age is not None and age >= 1.5:
+            subject = "⚠️ 数据延迟 - " + subject
+
+        # 纯文本版本（一屏）
+        body_lines = [
+            "=" * 60,
+            "NGA 爬虫统计报告",
+            "=" * 60,
+            f"报告时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"状态: {state_line}",
+            "",
+        ]
         if 'db_reply_total' in stats:
-            daily = stats.get('db_daily_replies') or {}
-            age = stats.get('db_latest_age_hours')
-            if age is None:
-                state_line = "状态: ❔ 未知"
-            elif age >= 3:
-                state_line = f"状态: ❌ 数据停滞（最新数据 {age:.1f} 小时前）"
-            elif age >= 1.5:
-                state_line = f"状态: ⚠️ 数据延迟（最新数据 {age:.1f} 小时前）"
-            else:
-                state_line = f"状态: ✅ 采集正常（最新数据 {age:.1f} 小时前）"
-
-            db_lines = [
-                state_line,
-                "",
-                "📦 数据入库（实际写入数据库）:",
-                f"  - 累计主题: {stats.get('db_topic_total', 0):,}",
-                f"  - 累计回复: {stats.get('db_reply_total', 0):,}",
-                f"  - 累计用户: {stats.get('db_user_total', 0):,}",
-                f"  - 统一记录 post: {stats.get('db_post_total', 0):,}",
+            body_lines += [
+                "📦 数据",
+                f"  累计: 回复 {stats.get('db_reply_total', 0):,} · 主题 {stats.get('db_topic_total', 0):,} · 用户 {stats.get('db_user_total', 0):,}",
             ]
             if daily:
                 days = sorted(daily)
                 vals = [daily[d] for d in days]
-                db_lines.append(f"  - 近 7 天入库: {_sparkline(vals)}")
-                for d, n in zip(days, vals):
-                    db_lines.append(f"      {d}: {n:,} 条回复")
-            latest = stats.get('db_latest_sampling')
-            if latest:
-                db_lines.append(f"  - 最新采样时间: {latest}")
-            db_lines.append(f"  - 数据库大小: {stats.get('db_size_pretty', 'N/A')}")
-            db_lines.append("")
-            db_lines.append("💿 图片与磁盘:")
-            db_lines.append(f"  - 图片文件: {stats.get('images_files', 0):,} 个 / {stats.get('images_size_mb', 0):.1f} MB")
-            db_lines.append("")
-
-        # 格式化邮件内容
-        subject = f"NGA爬虫数据统计报告 - {datetime.now().strftime('%Y-%m-%d')}"
-        # 状态直接进主题，收件箱里一眼可见（2026-10-18）
-        if 'db_latest_age_hours' in stats:
-            age = stats['db_latest_age_hours']
-            if age >= 3:
-                subject = "❌ 数据停滞 - " + subject
-            elif age >= 1.5:
-                subject = "⚠️ 数据延迟 - " + subject
-
-        # 纯文本版本
-        body_lines = [
-            "=" * 70,
-            "                        NGA爬虫数据统计报告",
-            "=" * 70,
-            f"报告时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-        ] + db_lines + [
-            "📊 爬取统计（技术指标）:",
-            f"  - 抓取条目: {stats.get('items_scraped', 0):,}（含每轮重复抓取的活跃帖回复）",
-            f"  - 爬取页面总数: {stats.get('pages_crawled', 0):,}",
-            f"  - 去重过滤数: {stats.get('dupefilter_filtered', 0):,}",
-            f"  - 数据提取效率: {efficiency:.2f} 项目/页",
-            "",
-            "📈 运行统计:",
-            f"  - 总执行次数: {stats.get('total_runs', 0)}",
-            f"  - 成功执行次数: {stats.get('successful_runs', 0)}",
-            f"  - 失败执行次数: {stats.get('failed_runs', 0)}",
-            f"  - 总运行时间: {stats.get('total_runtime', 0):.2f}秒",
-            f"  - 平均执行时间: {stats.get('avg_runtime', 0):.2f}秒/次",
-            f"  - 平均爬取速度: {stats.get('avg_crawl_speed', 0):.2f} 页/分钟",
-            "",
-            "💾 资源消耗:",
-            f"  - 下载数据总量: {downloaded_mb:.2f} MB ({downloaded_mb/1024:.2f} GB)",
-            f"  - 平均下载速度: {stats.get('avg_download_speed', 0):.2f} MB/次",
-            f"  - 单页平均大小: {stats.get('avg_page_size', 0):.2f} KB",
-            "",
-            "✅ 执行状态:",
-            f"  - 执行成功率: {stats.get('success_rate', 0):.1f}%",
-            f"  - 最近执行状态: {stats.get('latest_status', 'unknown')}",
-            f"  - 反爬/登录墙命中: {stats.get('antibot_hits', 0):,} 次",
-            "",
-        ]
-
-        # 添加趋势信息
-        if trend_data and trend_data.get('has_trend', False):
-            body_lines.extend([
-                "📊 趋势分析:",
-                f"  - 分析周期: {trend_data.get('analysis_period', 'N/A')} ({trend_data.get('days_analyzed', 0)}天)",
-                f"  - 项目增长趋势: {trend_data.get('items_trend', 'N/A')}",
-                f"  - 成功率变化: {trend_data.get('success_trend', 'N/A')}",
-                f"  - 性能变化: {trend_data.get('performance_trend', 'N/A')}",
+                body_lines.append(
+                    f"  近 7 天: {_sparkline(vals)}  "
+                    + " ".join(f"{d[5:]}:{n:,}" for d, n in zip(days, vals)))
+            body_lines += [
+                f"  最新采样: {stats.get('db_latest_sampling', 'N/A')}",
+                f"  库 {stats.get('db_size_pretty', 'N/A')} · 图片 {stats.get('images_files', 0):,} 个 / {stats.get('images_size_mb', 0):.1f} MB",
                 "",
-            ])
-
-        body_lines.extend([
-            "=" * 70,
-            "此报告由NGA爬虫调度器自动生成",
-        ])
+            ]
+        body_lines += [
+            "⏱️ 爬虫",
+            f"  最近 {len(rt_values)} 轮时长(秒): {_sparkline(rt_values)}",
+            f"  本轮 {rt_last:.0f}s · 中位 {rt_median:.0f}s · 最长 {rt_max:.0f}s",
+            f"  成功率 {stats.get('success_rate', 0):.0f}% · 抓取条目 {stats.get('items_scraped', 0):,} · 反爬命中 {stats.get('antibot_hits', 0)}",
+            "=" * 60,
+        ]
         body = "\n".join(body_lines)
 
         # HTML版本
-        # 计算性能指标
-        avg_crawl_speed = 0
-        if stats.get('avg_runtime', 0) > 0:
-            avg_crawl_speed = (stats.get('pages_crawled', 0) / stats.get('total_runs', 1)) / (stats.get('avg_runtime', 1) / 60)
-
-        avg_page_size = 0
-        if stats.get('pages_crawled', 0) > 0:
-            avg_page_size = (stats.get('response_bytes', 0) / stats.get('pages_crawled', 1)) / 1024
-
         # 数据入库 HTML（2026-10-18 新增；旧版报告无这些字段时整段跳过）
         db_html = ""
         if 'db_reply_total' in stats:
@@ -381,33 +326,6 @@ class EmailNotifier:
                         <div class="stat-item"><span class="label">图片文件</span><span class="value">{stats.get('images_files', 0):,} 个 / {stats.get('images_size_mb', 0):.1f} MB</span></div>
                     </div>
                     <div class="divider"></div>
-            """
-
-        # 趋势分析HTML
-        trend_html = ""
-        if trend_data and trend_data.get('has_trend', False):
-            analysis_period = trend_data.get('analysis_period', 'N/A')
-            days_analyzed = trend_data.get('days_analyzed', 0)
-            trend_html = f"""
-            <h2>📊 趋势分析</h2>
-            <div class="stat-box">
-                <div class="stat-item">
-                    <span class="label">分析周期</span>
-                    <span class="value">{analysis_period} ({days_analyzed}天)</span>
-                </div>
-                <div class="stat-item">
-                    <span class="label">项目增长趋势</span>
-                    <span class="value trend">{trend_data.get('items_trend', 'N/A')}</span>
-                </div>
-                <div class="stat-item">
-                    <span class="label">成功率变化</span>
-                    <span class="value trend">{trend_data.get('success_trend', 'N/A')}</span>
-                </div>
-                <div class="stat-item">
-                    <span class="label">性能变化</span>
-                    <span class="value trend">{trend_data.get('performance_trend', 'N/A')}</span>
-                </div>
-            </div>
             """
 
         html_body = f"""
@@ -544,109 +462,23 @@ class EmailNotifier:
 
                 <div class="content">
                     {db_html}
-                    <h2>📈 核心指标概览</h2>
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="label">抓取条目（含重复）</div>
-                            <div class="number">{stats.get('items_scraped', 0):,}</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="label">爬取页面</div>
-                            <div class="number">{stats.get('pages_crawled', 0):,}</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="label">执行次数</div>
-                            <div class="number">{stats.get('total_runs', 0)}</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="label">成功率</div>
-                            <div class="number success">{stats.get('success_rate', 0):.1f}%</div>
-                        </div>
-                    </div>
 
-                    <div class="divider"></div>
-
-                    <h2>📊 爬取统计</h2>
+                    <h2>⏱️ 爬虫运行</h2>
                     <div class="stat-box">
-                        <div class="stat-item">
-                            <span class="label">抓取项目总数</span>
-                            <span class="value">{stats.get('items_scraped', 0):,}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">爬取页面总数</span>
-                            <span class="value">{stats.get('pages_crawled', 0):,}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">去重过滤数</span>
-                            <span class="value warning">{stats.get('dupefilter_filtered', 0):,}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">数据提取效率</span>
-                            <span class="value">{efficiency:.2f} 项目/页</span>
-                        </div>
+                        <div style="font-size:13px;color:#555;margin-bottom:6px;">最近 {len(rt_values)} 轮时长（秒）</div>
+                        <div style="font-family:monospace;font-size:20px;letter-spacing:3px;color:#667eea;margin-bottom:10px;">{_sparkline(rt_values)}</div>
+                        <div class="stat-item"><span class="label">本轮</span><span class="value">{rt_last:.0f}s</span></div>
+                        <div class="stat-item"><span class="label">中位</span><span class="value">{rt_median:.0f}s</span></div>
+                        <div class="stat-item"><span class="label">最长</span><span class="value">{rt_max:.0f}s</span></div>
                     </div>
 
-                    <h2>⏱️ 运行统计</h2>
+                    <h2>📊 技术指标</h2>
                     <div class="stat-box">
-                        <div class="stat-item">
-                            <span class="label">总执行次数</span>
-                            <span class="value">{stats.get('total_runs', 0)}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">成功执行次数</span>
-                            <span class="value success">{stats.get('successful_runs', 0)}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">失败执行次数</span>
-                            <span class="value warning">{stats.get('failed_runs', 0)}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">总运行时间</span>
-                            <span class="value">{stats.get('total_runtime', 0):.2f}秒</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">平均执行时间</span>
-                            <span class="value">{stats.get('avg_runtime', 0):.2f}秒/次</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">平均爬取速度</span>
-                            <span class="value info">{avg_crawl_speed:.2f} 页/分钟</span>
-                        </div>
+                        <div class="stat-item"><span class="label">成功率</span><span class="value success">{stats.get('success_rate', 0):.0f}%</span></div>
+                        <div class="stat-item"><span class="label">抓取条目（含重复）</span><span class="value">{stats.get('items_scraped', 0):,}</span></div>
+                        <div class="stat-item"><span class="label">抓取页面</span><span class="value">{stats.get('pages_crawled', 0):,}</span></div>
+                        <div class="stat-item"><span class="label">反爬/登录墙命中</span><span class="value warning">{stats.get('antibot_hits', 0)} 次</span></div>
                     </div>
-
-                    <h2>💾 资源消耗</h2>
-                    <div class="stat-box">
-                        <div class="stat-item">
-                            <span class="label">下载数据总量</span>
-                            <span class="value">{downloaded_mb:.2f} MB ({downloaded_mb/1024:.2f} GB)</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">平均下载速度</span>
-                            <span class="value">{stats.get('avg_download_speed', 0):.2f} MB/次</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">单页平均大小</span>
-                            <span class="value">{avg_page_size:.2f} KB</span>
-                        </div>
-                    </div>
-
-                    <h2>✅ 执行状态</h2>
-                    <div class="stat-box">
-                        <div class="stat-item">
-                            <span class="label">执行成功率</span>
-                            <span class="value success">{stats.get('success_rate', 0):.1f}%</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">最近执行状态</span>
-                            <span class="value info">{stats.get('latest_status', 'unknown')}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="label">反爬/登录墙命中</span>
-                            <span class="value warning">{stats.get('antibot_hits', 0):,} 次</span>
-                        </div>
-                    </div>
-
-                    {trend_html}
 
                     <div class="divider"></div>
                 </div>
@@ -792,6 +624,7 @@ class StatisticsCollector:
 
         # 用于趋势分析的历史数据
         daily_stats = {}  # 按天聚合的数据
+        recent_runs = []  # 最近轮次 (时间标签, 运行秒数)，用于邮件中的时长分布
 
         # 如果统计目录不存在，返回默认统计
         if not os.path.exists(self.stats_dir):
@@ -856,6 +689,7 @@ class StatisticsCollector:
                         # 累加运行时间
                         runtime = spider_stats.get('elapsed_time_seconds', 0) or summary.get('runtime_seconds', 0)
                         aggregated_stats['total_runtime'] += runtime
+                        recent_runs.append((file_timestamp.strftime('%m-%d %H:%M'), runtime))
 
                         # 按天聚合数据用于趋势分析
                         day_key = file_timestamp.strftime('%Y-%m-%d')
@@ -903,6 +737,10 @@ class StatisticsCollector:
 
             # 添加最新状态
             aggregated_stats['latest_status'] = latest_status
+
+            # 最近 12 轮运行时长（邮件中的时长分布，2026-10-18）
+            recent_runs.sort(key=lambda x: x[0])
+            aggregated_stats['recent_runtimes'] = recent_runs[-12:]
 
             # 趋势分析
             if len(daily_stats) >= 2:

@@ -213,13 +213,14 @@ def run_spider():
         # （Playwright/Twisted 收尾残留），wait() 无超时会让调度器永远阻塞。
         # 注意 Scrapy 的日志写在 LOG_FILE（nga_spider.log），不经 stdout——监控增量内容。
         # 出现 "Spider closed" 后给 90 秒退出宽限；整轮上限 2 小时。
+        _watchdog_state = {'closed_at': None, 'killed': False}
+
         def _spider_watchdog():
             log_path = os.path.join(PROJECT_ROOT, 'nga_spider.log')
             try:
                 pos = os.path.getsize(log_path)
             except OSError:
                 pos = 0
-            closed_at = None
             deadline = time.monotonic() + 7200
             while time.monotonic() < deadline:
                 if spider_process.poll() is not None:
@@ -233,13 +234,15 @@ def run_spider():
                             f.seek(pos)
                             chunk = f.read()
                         pos = size
-                        if 'Spider closed' in chunk and closed_at is None:
-                            closed_at = time.monotonic()
+                        if 'Spider closed' in chunk and _watchdog_state['closed_at'] is None:
+                            _watchdog_state['closed_at'] = time.monotonic()
                 except OSError:
                     pass
 
+                closed_at = _watchdog_state['closed_at']
                 if closed_at is not None and time.monotonic() - closed_at > 90:
                     logger.warning("spider 已关闭但进程 90 秒未退出，强制终止（关闭阶段残留）")
+                    _watchdog_state['killed'] = True
                     try:
                         spider_process.kill()
                     except Exception:
@@ -297,6 +300,12 @@ def run_spider():
 
         # 等待进程结束
         return_code = spider_process.wait()
+
+        # 看门狗因关闭阶段残留而终止，但日志已见 Spider closed：数据已经抓完，
+        # 不应记为爬虫失败（否则连续 3 轮会误发"爬虫连续失败"告警）。
+        if _watchdog_state['killed'] and _watchdog_state['closed_at'] is not None:
+            logger.warning(f"进程被看门狗终止（返回码 {return_code}），spider 已完成关闭，按成功处理")
+            return_code = 0
 
         if return_code == 0:
             logger.info("=" * 60)
