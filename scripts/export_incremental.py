@@ -91,8 +91,9 @@ def main():
                     sql = sql.decode()
                 with open(path, 'w', encoding='utf-8', newline='') as f:
                     cur.copy_expert(sql, f)
-                with open(path, encoding='utf-8') as f:
-                    counts[table] = sum(1 for _ in f) - 1  # 去掉表头
+                # 行数按数据库统计——CSV 内容可能含换行，数文件行会虚高
+                cur.execute(f'SELECT count(*) FROM {quote(table)} {where}', params)
+                counts[table] = cur.fetchone()[0]
 
         out = os.path.join(INC_DIR, f'nga_inc_{stamp}.tar.gz')
         with tarfile.open(out, 'w:gz') as tar:
