@@ -211,15 +211,33 @@ def run_spider():
 
         # 关闭看门狗（2026-10-18）：Scrapy 2.19 下 spider 已完成关闭后进程仍可能不退出
         # （Playwright/Twisted 收尾残留），wait() 无超时会让调度器永远阻塞。
+        # 注意 Scrapy 的日志写在 LOG_FILE（nga_spider.log），不经 stdout——监控增量内容。
         # 出现 "Spider closed" 后给 90 秒退出宽限；整轮上限 2 小时。
-        _proc_state = {'closed_at': None}
-
         def _spider_watchdog():
+            log_path = os.path.join(PROJECT_ROOT, 'nga_spider.log')
+            try:
+                pos = os.path.getsize(log_path)
+            except OSError:
+                pos = 0
+            closed_at = None
             deadline = time.monotonic() + 7200
             while time.monotonic() < deadline:
                 if spider_process.poll() is not None:
                     return
-                closed_at = _proc_state['closed_at']
+                try:
+                    size = os.path.getsize(log_path)
+                    if size < pos:  # 日志被轮转或重建
+                        pos = 0
+                    if size > pos:
+                        with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            f.seek(pos)
+                            chunk = f.read()
+                        pos = size
+                        if 'Spider closed' in chunk and closed_at is None:
+                            closed_at = time.monotonic()
+                except OSError:
+                    pass
+
                 if closed_at is not None and time.monotonic() - closed_at > 90:
                     logger.warning("spider 已关闭但进程 90 秒未退出，强制终止（关闭阶段残留）")
                     try:
@@ -228,6 +246,7 @@ def run_spider():
                         pass
                     return
                 time.sleep(5)
+
             if spider_process.poll() is None:
                 logger.warning("spider 运行超过 2 小时，强制终止")
                 try:
@@ -245,10 +264,6 @@ def run_spider():
         for line in spider_process.stdout:
             line_stripped = line.strip()
             output_lines.append(line_stripped)
-
-            # 看门狗计时起点：一旦看到 Spider closed，只给固定宽限退出
-            if 'Spider closed' in line_stripped:
-                _proc_state['closed_at'] = time.monotonic()
 
             if line_stripped:
                 logger.info(f"[Spider] {line_stripped}")
